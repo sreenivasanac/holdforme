@@ -34,7 +34,7 @@ export const LIMITS = {
 /** Demo support line: Twilio number whose TwiML plays a phone menu + hold, then dials the AI "rep". */
 export const DEMO = {
   company: "Northstar Internet (demo line)",
-  issue: "I was charged twice for my October internet bill ($79.99). Please refund the duplicate charge.",
+  issue: "I was charged twice for my October internet bill ($79.99). Please refund the duplicate charge. Account holder: Alex Rivera, email alex.rivera@example.com.",
   menuTips: "For billing, press 1.",
   voice: "Polly.Joanna",
   holdMusicPath: "/demo/hold-music.mp3",

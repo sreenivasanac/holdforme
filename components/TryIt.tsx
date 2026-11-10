@@ -91,7 +91,7 @@ export default function TryIt({ busy, onStart }: { busy: boolean; onStart: (c: P
           <div><label htmlFor="number">{tab === "me" ? "Your phone (HoldForMe calls it)" : "Support number (optional)"}</label>
             <input id="number" type="tel" inputMode="tel" value={f.number} onChange={set("number")} placeholder={tab === "me" ? "(415) 555-0123" : "Exa finds it"} /></div>
         </div>}
-        <div><label htmlFor="issue">Issue the agent explains to the rep</label><textarea id="issue" rows={2} value={f.issue} onChange={set("issue")} /></div>
+        <div><label htmlFor="issue">Issue the agent explains (add a name the rep can ask for)</label><textarea id="issue" rows={2} value={f.issue} onChange={set("issue")} /></div>
         <div className="row">
           <div><label htmlFor="mode">When a human answers</label>
             <select id="mode" value={f.mode} onChange={set("mode")}>

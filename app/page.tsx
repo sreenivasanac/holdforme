@@ -20,7 +20,7 @@ const FAQ = [
   ["Does it work with real companies?", "Yes. Tab 3 calls a real support line. Real hold times can be long, so choose \"Transfer the call to my phone\" and leave the tab open."],
   ["Why not just use a voicemail-detection feature?", "Answering-machine detection only checks the first seconds of a call. On hold, the line plays many recorded messages that sound like people. HoldForMe checks every line during the whole wait and needs strong evidence before it alerts you."],
   ["What if Jev is not available?", "Each line falls back to keyword rules, so the call continues. The chip on each line shows which one labeled it."],
-  ["What does it cost?", "COST_TBD"],
+  ["What does it cost?", "We measured a full demo call (menu, 1 minute of hold, 40 seconds with the rep): $0.10 for the HoldForMe agent in Vapi (Deepgram, LLM, voice), $0.05 for the AI rep, and about $0.05 in Twilio minutes. On a real call, waiting on hold costs about $0.07 per minute."],
   ["Limits on this public demo", `US and Canada numbers only, no 900/976 lines, ${LIMITS.callsPerIpPerHour} calls per hour per visitor, ${LIMITS.maxActiveCalls} calls at the same time, and ${LIMITS.maxCallSeconds / 60} minutes per call. Calls are recorded by Vapi so you can replay them.`],
 ];
 
