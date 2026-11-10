@@ -1,0 +1,22 @@
+:root { --bg: #0b1020; --card: #141a2e; --fg: #e8ecf8; --muted: #8a93b0; --brand: #4f7cff; --ok: #22c55e; --warn: #f59e0b; --bad: #ef4444; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, sans-serif; }
+main { max-width: 960px; margin: 0 auto; padding: 24px 16px; display: flex; flex-direction: column; gap: 16px; }
+.card { background: var(--card); border-radius: 14px; padding: 18px; }
+.row { display: flex; flex-direction: column; gap: 12px; }
+@media (min-width: 768px) { .row { flex-direction: row; } .row > * { flex: 1; } }
+label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+input, textarea, select { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid #2a3355; background: #0f1528; color: var(--fg); font: inherit; }
+button { padding: 12px 18px; border: 0; border-radius: 10px; background: var(--brand); color: #fff; font-weight: 600; cursor: pointer; }
+button.secondary { background: #2a3355; }
+button:disabled { opacity: .5; }
+.pill { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; background: #2a3355; }
+.HUMAN_ON_LINE, .HANDED_OFF { background: var(--ok); color: #04210f; }
+.ON_HOLD, .IVR { background: var(--warn); color: #2a1a00; }
+.FAILED { background: var(--bad); }
+.alarm { background: var(--ok); color: #04210f; font-size: 22px; font-weight: 800; text-align: center; animation: pulse 0.8s infinite; }
+@keyframes pulse { 50% { opacity: .6; } }
+.lines { max-height: 360px; overflow: auto; display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
+.line.agent { color: #9fb6ff; }
+.tag { color: var(--muted); font-size: 11px; margin-left: 6px; }
+.err { color: var(--bad); }
