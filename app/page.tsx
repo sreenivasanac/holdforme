@@ -1,137 +1,110 @@
-"use client";
-import { useEffect, useRef, useState } from "react";
-import { APP_NAME, TAGLINE, BASE_PATH, HANDOFF_MODES, type HandoffMode } from "@/lib/config";
-import type { Call } from "@/lib/store";
+import { APP_NAME, HUMAN_CONFIDENCE, HUMAN_STREAK, LIMITS, REPO_URL, TAGLINE } from "@/lib/config";
+import Console from "@/components/Console";
 
-/** Loud looping two-tone alarm via Web Audio (no asset). Returns a stop function. */
-function startAlarm() {
-  const ctx = new AudioContext();
-  const osc = ctx.createOscillator(); const gain = ctx.createGain();
-  osc.type = "square"; gain.gain.value = 0.6; osc.connect(gain).connect(ctx.destination); osc.start();
-  const t = setInterval(() => { osc.frequency.value = osc.frequency.value === 880 ? 660 : 880; }, 350);
-  navigator.vibrate?.([500, 200, 500, 200, 500]);
-  return () => { clearInterval(t); osc.stop(); ctx.close(); };
-}
+const HOW = [
+  { n: 1, title: "Find the line", by: "Exa", text: "Tell it the company and the problem. Exa search finds the support number and tips for its phone menu." },
+  { n: 2, title: "Dial and get through the menu", by: "Vapi + Twilio", text: "Vapi calls from a real phone number. The agent presses keys (DTMF) or says the option that fits your issue." },
+  { n: 3, title: "Wait on hold, silently", by: "Deepgram + Jev", text: "Deepgram Nova-3 transcribes the line live. Jev labels each line as hold music, a recorded message, a phone menu, or a live human." },
+  { n: 4, title: "Get the human", by: "Vapi live control", text: "When a person answers, your browser alarms. The call transfers to your phone, or you listen in and type lines, or the agent finishes the job." },
+];
 
-/** Parse "call Comcast about my bill" into company + issue. */
-function parseRequest(s: string) {
-  const m = s.match(/^\s*call\s+(.+?)\s+(?:about|regarding|for|re)\s+(.+)$/i);
-  return m ? { company: m[1], issue: m[2] } : null;
-}
+const LABELS = [
+  ["menu_prompt", "Phone menu", "\"For billing, press 1.\""],
+  ["recorded_message", "Recorded message", "\"Your call is important to us. Please continue to hold.\""],
+  ["hold_music", "Hold music", "Music, tones, or silence"],
+  ["live_human", "Live human", "\"Hi, thanks for holding, this is Maria. How can I help?\""],
+];
+
+const FAQ = [
+  ["Is the person on the demo line real?", "No. The demo line is a real phone number with a real phone menu, recorded messages, and hold music. After about 50 seconds it connects to Maria, an AI voice that plays a billing rep. Use tab 2 to be the human yourself."],
+  ["Does it work with real companies?", "Yes. Tab 3 calls a real support line. Real hold times can be long, so choose \"Transfer the call to my phone\" and leave the tab open."],
+  ["Why not just use a voicemail-detection feature?", "Answering-machine detection only checks the first seconds of a call. On hold, the line plays many recorded messages that sound like people. HoldForMe checks every line during the whole wait and needs strong evidence before it alerts you."],
+  ["What if Jev is not available?", "Each line falls back to keyword rules, so the call continues. The chip on each line shows which one labeled it."],
+  ["What does it cost?", "COST_TBD"],
+  ["Limits on this public demo", `US and Canada numbers only, no 900/976 lines, ${LIMITS.callsPerIpPerHour} calls per hour per visitor, ${LIMITS.maxActiveCalls} calls at the same time, and ${LIMITS.maxCallSeconds / 60} minutes per call. Calls are recorded by Vapi so you can replay them.`],
+];
 
 export default function Home() {
-  const [req, setReq] = useState("");
-  const [form, setForm] = useState({ company: "", issue: "", number: "", myPhone: "", mode: "transfer" as HandoffMode, mock: false });
-  const [call, setCall] = useState<Call | null>(null);
-  const [err, setErr] = useState("");
-  const [listening, setListening] = useState(false);
-  const stopAlarm = useRef<null | (() => void)>(null);
-
-  useEffect(() => {
-    if (!call || ["ENDED", "FAILED"].includes(call.state)) return;
-    const t = setInterval(async () => setCall(await (await fetch(`${BASE_PATH}/api/calls/${call.id}`)).json()), 1000);
-    return () => clearInterval(t);
-  }, [call?.id, call?.state]);
-
-  useEffect(() => {
-    if (call?.state === "HUMAN_ON_LINE" && !stopAlarm.current) stopAlarm.current = startAlarm();
-    if (call && ["ENDED", "FAILED"].includes(call.state)) silence();
-  }, [call?.state]);
-
-  function silence() { stopAlarm.current?.(); stopAlarm.current = null; }
-
-  function voiceInput() {
-    // TODO: swap browser SpeechRecognition for Deepgram Voice Agent + Think Live intake.
-    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SR) return setErr("Voice input not supported in this browser");
-    const r = new SR(); r.lang = "en-US"; setListening(true);
-    r.onresult = (e: any) => applyRequest(e.results[0][0].transcript);
-    r.onend = () => setListening(false); r.start();
-  }
-
-  function applyRequest(s: string) {
-    setReq(s);
-    const p = parseRequest(s);
-    if (p) setForm((f) => ({ ...f, ...p }));
-  }
-
-  async function start() {
-    setErr("");
-    const res = await fetch(`${BASE_PATH}/api/calls`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
-    const j = await res.json();
-    if (!res.ok) return setErr(j.error);
-    setCall(j);
-  }
-
-  /** Browser listen-in via Vapi monitor listenUrl (PCM over WebSocket). */
-  function listenIn() {
-    if (!call?.listenUrl) return;
-    const ctx = new AudioContext({ sampleRate: 16000 }); let at = ctx.currentTime;
-    const ws = new WebSocket(call.listenUrl); ws.binaryType = "arraybuffer";
-    ws.onmessage = (e) => {
-      if (typeof e.data === "string") return;
-      const pcm = new Int16Array(e.data); const buf = ctx.createBuffer(1, pcm.length, 16000);
-      buf.getChannelData(0).set(Float32Array.from(pcm, (v) => v / 32768));
-      const src = ctx.createBufferSource(); src.buffer = buf; src.connect(ctx.destination);
-      at = Math.max(at, ctx.currentTime); src.start(at); at += buf.duration;
-    };
-  }
-
-  const set = (k: string) => (e: any) => setForm({ ...form, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
-
   return (
     <main>
-      <header><h1 style={{ margin: 0 }}>{APP_NAME}</h1><div style={{ color: "var(--muted)" }}>{TAGLINE}</div></header>
+      <header className="hero">
+        <div className="brand">{APP_NAME}</div>
+        <h1>{TAGLINE}</h1>
+        <p className="lead">HoldForMe is an AI agent that calls customer support for you. It gets through the phone menu, waits on hold, and alerts you the moment a real person answers. Then it transfers the call to your phone.</p>
+        <div className="cta">
+          <a className="button" href="#try">Start a demo call</a>
+          <a className="button secondary" href={REPO_URL} target="_blank" rel="noreferrer">Source on GitHub</a>
+        </div>
+        <ul className="stack-tags" aria-label="Built with">
+          {["Vapi", "Deepgram", "Jev (Typesafe)", "Exa", "Twilio", "Next.js"].map((t) => <li key={t}>{t}</li>)}
+        </ul>
+      </header>
 
-      {call?.state === "HUMAN_ON_LINE" && (
-        <div className="card alarm" onClick={silence}>
-          A live human picked up at {call.company}! {call.mode === "transfer" ? "Calling your phone now." : call.mode === "browser" ? "Join now." : "Agent is handling it."} (tap to silence)
-        </div>
-      )}
+      <Console />
 
-      <section className="card row" style={{ flexDirection: "column" }}>
-        <div>
-          <label>What should I do?</label>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input placeholder='e.g. "call Comcast about my bill"' value={req} onChange={(e) => applyRequest(e.target.value)} />
-            <button className="secondary" onClick={voiceInput} aria-label="Speak request">{listening ? "..." : "Speak"}</button>
-          </div>
-        </div>
-        <div className="row">
-          <div><label>Company</label><input value={form.company} onChange={set("company")} /></div>
-          <div><label>Support number (optional, Exa finds it)</label><input placeholder="+18009346489" value={form.number} onChange={set("number")} disabled={form.mock} /></div>
-        </div>
-        <div><label>Issue</label><textarea rows={2} value={form.issue} onChange={set("issue")} /></div>
-        <div className="row">
-          <div><label>When a human answers</label>
-            <select value={form.mode} onChange={set("mode")}>{Object.entries(HANDOFF_MODES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></div>
-          <div><label>My phone (for transfer)</label><input placeholder="+14155550123" value={form.myPhone} onChange={set("myPhone")} /></div>
-        </div>
-        <label style={{ display: "flex", gap: 8, alignItems: "center" }}><input type="checkbox" style={{ width: "auto" }} checked={form.mock} onChange={set("mock")} /> Use mock support line (stage demo)</label>
-        <button onClick={start} disabled={!form.company || !form.issue}>Call for me</button>
-        {err && <div className="err">{err}</div>}
+      <section className="card">
+        <h2>What to look for during a demo call</h2>
+        <ul className="checks">
+          <li>The status moves from <b>Dialing</b> to <b>Phone menu</b> to <b>On hold</b>, and the agent presses 1 by itself.</li>
+          <li>Each line in the transcript gets a label with a confidence score from Jev.</li>
+          <li>The agent stays silent through hold music and recorded messages and does not hang up.</li>
+          <li>When Maria says {`"Hi, this is Maria"`}, the alarm sounds and the status changes to <b>Human on the line</b>.</li>
+          <li>Click <b>Listen live</b> to hear the call. When a human answers, type a line and the agent says it.</li>
+          <li>When the call ends, you get a summary and a recording.</li>
+        </ul>
       </section>
 
-      {call && (
-        <section className="card">
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <div><b>{call.company}</b> {call.number && <span className="tag">{call.number}</span>}</div>
-            <span className={`pill ${call.state}`}>{call.state.replace(/_/g, " ")}</span>
+      <section>
+        <h2 className="center">How it works</h2>
+        <div className="grid4">
+          {HOW.map((h) => (
+            <div key={h.n} className="card step">
+              <div className="num">{h.n}</div>
+              <h3>{h.title}</h3>
+              <div className="by">{h.by}</div>
+              <p>{h.text}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="card">
+        <h2>How it knows a human picked up</h2>
+        <p>Many recorded messages sound like a person. A false alarm makes you run back to the phone for nothing, so detection has two layers:</p>
+        <div className="grid2">
+          <div>
+            <h3>1. Jev labels every line</h3>
+            <ul className="labels">
+              {LABELS.map(([k, name, ex]) => <li key={k}><span className={`chip ${k}`}>{name}</span> {ex}</li>)}
+            </ul>
           </div>
-          {call.error && <p className="err">{call.error}</p>}
-          {call.menuTips && <details><summary>Phone menu tips (Exa)</summary><p style={{ fontSize: 14 }}>{call.menuTips}</p></details>}
-          <div style={{ display: "flex", gap: 8, margin: "12px 0", flexWrap: "wrap" }}>
-            {call.listenUrl && <button className="secondary" onClick={listenIn}>Listen in</button>}
-            {call.mode === "browser" && call.state === "HUMAN_ON_LINE" && <button onClick={listenIn}>Join now</button>}
-            {!["ENDED", "FAILED"].includes(call.state) && <button className="secondary" onClick={() => fetch(`${BASE_PATH}/api/calls/${call.id}`, { method: "POST", body: JSON.stringify({ action: "hangup" }) })}>Hang up</button>}
+          <div>
+            <h3>2. A confirmation rule</h3>
+            <p>An alert needs <b>{HUMAN_STREAK} {`"live human"`} lines in a row</b>, or <b>1 line with {Math.round(HUMAN_CONFIDENCE * 100)}% confidence or more</b>.</p>
+            <p>Jev gets the latest line plus the 3 lines before it, so it can see that hold has ended. A rep who says their name, asks {`"how can I help"`}, or asks for your account counts as human. A recorded greeting does not.</p>
           </div>
-          <div className="lines">
-            {call.lines.map((l, i) => <div key={i} className={`line ${l.role}`}><b>{l.role === "agent" ? "Agent" : call.company}:</b> {l.text}{l.label && <span className="tag">{l.label}</span>}</div>)}
-          </div>
-          {call.summary && <><h3>Summary</h3><p>{call.summary}</p></>}
-          {call.recordingUrl && <audio controls src={call.recordingUrl} style={{ width: "100%" }} />}
-        </section>
-      )}
+        </div>
+      </section>
+
+      <section className="card">
+        <h2>Architecture</h2>
+        <ol className="flow">
+          <li><b>Browser</b><small>Next.js app, polls the call every second</small></li>
+          <li><b>Exa</b><small>number + phone-menu tips</small></li>
+          <li><b>Vapi</b><small>outbound call over Twilio, Deepgram STT and voice, DTMF tool</small></li>
+          <li><b>Webhook</b><small>each transcript line goes to Jev, then the confirmation rule</small></li>
+          <li><b>Handoff</b><small>Vapi live control: transfer, say, end call</small></li>
+        </ol>
+      </section>
+
+      <section className="card">
+        <h2>Questions</h2>
+        {FAQ.map(([q, a]) => <details key={q}><summary>{q}</summary><p>{a}</p></details>)}
+      </section>
+
+      <footer>
+        Built for the Side Quest Hotline Vapi Hackathon by Sreenivasan AC · <a href={REPO_URL} target="_blank" rel="noreferrer">GitHub</a>
+      </footer>
     </main>
   );
 }

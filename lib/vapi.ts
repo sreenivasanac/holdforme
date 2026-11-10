@@ -1,29 +1,25 @@
-import { LLM, TRANSCRIBER, VOICE, env, type HandoffMode } from "./config.ts";
+import { LIMITS, LLM, TRANSCRIBER, VOICE, env, type HandoffMode } from "./config.ts";
 
 const handoffRule: Record<HandoffMode, string> = {
   transfer: "Then say: 'Thank you, I'm connecting the account holder now, one moment.' and stop talking. The system transfers the call.",
-  browser: "Then say: 'Thank you, the account holder is joining now, one moment please.' Keep the rep engaged politely until they join.",
-  agent: "Then try to resolve the issue yourself. Ask for any reference number. If you need information you do not have, say you will call back.",
+  browser: "Then say the account holder is joining in a moment. Keep the rep engaged politely; the account holder may send you lines to say.",
+  agent: "Then resolve the issue yourself: answer the rep's questions with what you know, ask for a reference number, thank them, and use the endCall tool. If they need information you do not have, say the account holder will call back.",
 };
 
-/** Transient Vapi assistant: Deepgram ears + voice, DTMF for menus, patient on hold. */
-export function buildAssistant(c: { company: string; issue: string; menuTips?: string; mode: HandoffMode; myPhone: string }) {
-  const tools: unknown[] = [{ type: "dtmf" }, { type: "endCall" }];
-  if (c.mode === "transfer" && c.myPhone) {
-    tools.push({ type: "transferCall", destinations: [{ type: "number", number: c.myPhone,
-      transferPlan: { mode: "warm-transfer-say-summary", summaryPlan: { enabled: true } } }] });
-  }
+/** Transient Vapi assistant: Deepgram ears + voice, DTMF for menus, patient on hold. Transfers are done server-side. */
+export function buildAssistant(c: { company: string; issue: string; menuTips?: string; mode: HandoffMode }) {
   return {
     name: "HoldForMe caller",
     firstMessageMode: "assistant-waits-for-user",
     transcriber: TRANSCRIBER,
     voice: VOICE,
-    silenceTimeoutSeconds: 3600,
-    maxDurationSeconds: 3600,
+    silenceTimeoutSeconds: LIMITS.maxCallSeconds,
+    maxDurationSeconds: LIMITS.maxCallSeconds,
     backgroundSpeechDenoisingPlan: { smartDenoisingPlan: { enabled: true } },
-    serverMessages: ["transcript", "status-update", "end-of-call-report", "tool-calls"],
+    monitorPlan: { listenEnabled: true, controlEnabled: true },
+    serverMessages: ["transcript", "status-update", "end-of-call-report"],
     server: { url: `${env.publicBaseUrl}/api/vapi/webhook` },
-    model: { ...LLM, tools, messages: [{ role: "system", content:
+    model: { ...LLM, tools: [{ type: "dtmf" }, { type: "endCall" }], messages: [{ role: "system", content:
 `You are calling ${c.company} customer support on behalf of the account holder.
 Issue: ${c.issue}
 Phone menu tips (may be outdated): ${c.menuTips || "none"}
@@ -46,7 +42,8 @@ export async function vapi(path: string, body?: unknown, method = "POST") {
   return j;
 }
 
-/** Live call control (transfer / say) via the call's controlUrl. */
+/** Live call control (transfer / say / end-call) via the call's controlUrl. */
 export async function control(controlUrl: string, body: unknown) {
-  await fetch(controlUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const res = await fetch(controlUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!res.ok) throw new Error(`control ${res.status}`);
 }
