@@ -1,6 +1,8 @@
 /** Central config and branding. Secrets come from env (.env.local). */
 export const APP_NAME = "HoldForMe";
 export const TAGLINE = "I wait on hold. You get the human.";
+/** URL prefix when served under a sub-path (inlined at build time). */
+export const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH || "";
 
 export const LABELS = ["hold_music", "recorded_message", "menu_prompt", "live_human"] as const;
 export type Label = (typeof LABELS)[number];

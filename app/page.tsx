@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { APP_NAME, TAGLINE, HANDOFF_MODES, type HandoffMode } from "@/lib/config";
+import { APP_NAME, TAGLINE, BASE_PATH, HANDOFF_MODES, type HandoffMode } from "@/lib/config";
 import type { Call } from "@/lib/store";
 
 /** Loud looping two-tone alarm via Web Audio (no asset). Returns a stop function. */
@@ -29,7 +29,7 @@ export default function Home() {
 
   useEffect(() => {
     if (!call || ["ENDED", "FAILED"].includes(call.state)) return;
-    const t = setInterval(async () => setCall(await (await fetch(`/api/calls/${call.id}`)).json()), 1000);
+    const t = setInterval(async () => setCall(await (await fetch(`${BASE_PATH}/api/calls/${call.id}`)).json()), 1000);
     return () => clearInterval(t);
   }, [call?.id, call?.state]);
 
@@ -57,7 +57,7 @@ export default function Home() {
 
   async function start() {
     setErr("");
-    const res = await fetch("/api/calls", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
+    const res = await fetch(`${BASE_PATH}/api/calls`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
     const j = await res.json();
     if (!res.ok) return setErr(j.error);
     setCall(j);
@@ -123,7 +123,7 @@ export default function Home() {
           <div style={{ display: "flex", gap: 8, margin: "12px 0", flexWrap: "wrap" }}>
             {call.listenUrl && <button className="secondary" onClick={listenIn}>Listen in</button>}
             {call.mode === "browser" && call.state === "HUMAN_ON_LINE" && <button onClick={listenIn}>Join now</button>}
-            {!["ENDED", "FAILED"].includes(call.state) && <button className="secondary" onClick={() => fetch(`/api/calls/${call.id}`, { method: "POST", body: JSON.stringify({ action: "hangup" }) })}>Hang up</button>}
+            {!["ENDED", "FAILED"].includes(call.state) && <button className="secondary" onClick={() => fetch(`${BASE_PATH}/api/calls/${call.id}`, { method: "POST", body: JSON.stringify({ action: "hangup" }) })}>Hang up</button>}
           </div>
           <div className="lines">
             {call.lines.map((l, i) => <div key={i} className={`line ${l.role}`}><b>{l.role === "agent" ? "Agent" : call.company}:</b> {l.text}{l.label && <span className="tag">{l.label}</span>}</div>)}
