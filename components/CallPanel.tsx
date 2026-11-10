@@ -103,7 +103,7 @@ export default function CallPanel({ call, alarmOn, onSilence }: { call: PublicCa
         {!call.lines.length && <div className="muted">{live ? "Waiting for the line to speak…" : "No speech was heard."}</div>}
         {call.lines.map((l, i) => (
           <div key={i} className={`line ${l.role}`}>
-            <div className="who">{l.role === "agent" ? "HoldForMe agent" : call.company} <span>{mmss(l.at - call.createdAt)}</span></div>
+            <div className="who">{l.role === "agent" ? "AI agent" : call.company} <span>{mmss(l.at - call.createdAt)}</span></div>
             <div>{l.text}</div>
             {l.label && <span className={`chip ${l.label}`} title={`Classified by ${l.source === "jev" ? "Jev" : "keyword rules"}`}>
               {LABEL_TEXT[l.label as Label]} · {Math.round((l.score || 0) * 100)}% · {l.source === "jev" ? "Jev" : "rules"}

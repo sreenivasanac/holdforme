@@ -1,10 +1,13 @@
-# HoldForMe
+# CallOrHold4Me
 
-**I wait on hold. You get the human.** HoldForMe is an AI agent that calls customer support for you. It gets through the phone menu, waits on hold, and alerts you the moment a real person answers. Then it transfers the call to your phone, lets you listen in the browser, or explains your issue itself.
+**I make the call. I wait on hold. I get it done.** CallOrHold4Me is an AI agent that calls customer support for you. It gets through the phone menu and waits on hold. When a real person answers, it does one of two things:
+
+- **Call for me:** the agent handles the whole call. It explains your issue, answers the rep's questions, gets a reference number, and hangs up. You get a summary and a recording.
+- **Hold for me:** the agent alarms you and hands the human to you. The call transfers to your phone, or you listen live in the browser and type lines for the agent to say.
 
 Live demo: **https://pragnyalabs.com/hold4me**
 
-![HoldForMe home page](docs/screenshots/home.png)
+![CallOrHold4Me home page](docs/screenshots/home.png)
 
 ## Try it (judges)
 
@@ -12,8 +15,8 @@ Open https://pragnyalabs.com/hold4me and pick a tab in **Try it now**.
 
 | Tab | What happens | You need |
 | --- | --- | --- |
-| **1. Demo support line** (start here) | HoldForMe calls our demo line "Northstar Internet". It is a real phone number with a phone menu, about 50 s of hold music and recorded messages, then a billing rep "Maria" (an AI voice that plays the human). | Nothing. About 2 minutes. |
-| **2. Call me (I play the company)** | HoldForMe calls your phone. Read the script on the page: a menu, a hold message, then "Hi, this is Sam from billing". | A US/Canada phone |
+| **1. Demo support line** (start here) | The agent calls our demo line "Northstar Internet". It is a real phone number with a phone menu, about 50 s of hold music and recorded messages, then a billing rep "Maria" (an AI voice that plays the human). | Nothing. About 2 minutes. |
+| **2. Call me (I play the company)** | The agent calls your phone. Read the script on the page: a menu, a hold message, then "Hi, this is Sam from billing". | A US/Canada phone |
 | **3. Call a real company** | Type "call Delta about my lost bag". Exa finds the number and phone-menu tips, and the agent calls. | Patience for real hold times |
 
 What to look for during a call:
@@ -21,7 +24,7 @@ What to look for during a call:
 1. The agent presses **1** on the menu, then stays silent on hold.
 2. Every line the business says gets a label chip from **Jev**: hold music, recorded message, phone menu, or live human, with a score.
 3. When Maria answers, the **alarm** sounds, the banner turns green, and the tab title flashes.
-4. In "Let the agent explain my issue" mode, the agent explains the issue, gets the refund reference number, and hangs up. A summary and a recording follow.
+4. In **Call for me** mode (the default), the agent finishes the whole call: it gives the account name, gets the refund reference number, repeats it back, and hangs up. A summary and a recording follow.
 5. During the call you can press **Listen live** (audio streams to your browser), type a line under **Say it**, or **Hang up**.
 
 | Human detected | Call finished |
@@ -52,7 +55,7 @@ flowchart LR
 
 US and Canada numbers only (no 900/976 lines), 6 calls per hour per visitor, 4 calls at the same time, and 20 minutes per call. These live in `LIMITS` in `lib/config.ts`. Calls are recorded by Vapi so you can replay them.
 
-Measured cost of one demo call: about $0.18 for the HoldForMe agent in Vapi, $0.08 for the AI rep, and about $0.05 in Twilio minutes (about $0.30 in total).
+Measured cost of one demo call: about $0.18 for the CallOrHold4Me agent in Vapi, $0.08 for the AI rep, and about $0.05 in Twilio minutes (about $0.30 in total).
 
 ## Run it yourself
 

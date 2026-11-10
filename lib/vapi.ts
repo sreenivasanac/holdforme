@@ -9,7 +9,7 @@ const handoffRule: Record<HandoffMode, string> = {
 /** Transient Vapi assistant: Deepgram ears + voice, DTMF for menus, patient on hold. Transfers are done server-side. */
 export function buildAssistant(c: { company: string; issue: string; menuTips?: string; mode: HandoffMode }) {
   return {
-    name: "HoldForMe caller",
+    name: "CallOrHold4Me caller",
     firstMessageMode: "assistant-waits-for-user",
     transcriber: TRANSCRIBER,
     voice: VOICE,

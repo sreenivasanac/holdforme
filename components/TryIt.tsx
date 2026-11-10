@@ -62,11 +62,11 @@ export default function TryIt({ busy, onStart }: { busy: boolean; onStart: (c: P
       </div>
 
       {tab === "demo" && <div className="hint">
-        <b>Best for judges. No phone needed, about 90 seconds.</b> HoldForMe calls our demo support line {`"${DEMO.company}"`}. It is a real phone number with a phone menu, about 50 seconds of hold music and recorded messages, and then a billing rep named Maria. Maria is an AI voice that plays the human.
+        <b>Best for judges. No phone needed, about 90 seconds.</b> The agent calls our demo support line {`"${DEMO.company}"`}. It is a real phone number with a phone menu, about 50 seconds of hold music and recorded messages, and then a billing rep named Maria. Maria is an AI voice that plays the human.
         Watch the agent press 1, stay silent on hold, notice the moment Maria answers, and sound the alarm.
       </div>}
       {tab === "me" && <div className="hint">
-        <b>You play the support line.</b> HoldForMe calls your phone. Answer it, then say these lines with a short pause after each one:
+        <b>You play the support line.</b> The agent calls your phone. Answer it, then say these lines with a short pause after each one:
         <ol>
           <li>{`"Thanks for calling. For billing, press 1."`}: the agent presses a key.</li>
           <li>{`"Please hold. Your call is important to us."`}: the agent stays silent and the status changes to On hold.</li>
@@ -75,7 +75,7 @@ export default function TryIt({ busy, onStart }: { busy: boolean; onStart: (c: P
       </div>}
       {tab === "real" && <div className="hint">
         <b>Calls a real support line.</b> Exa finds the number and phone-menu tips. Leave the number empty to let Exa find it.
-        Real hold times can be long. Calls stop after {LIMITS.maxCallSeconds / 60} minutes. Choose {`"Transfer the call to my phone"`} to take over when a person answers.
+        Real hold times can be long. Calls stop after {LIMITS.maxCallSeconds / 60} minutes. Choose {`"Call for me"`} to let the agent finish the call, or {`"Hold for me"`} to take over when a person answers.
       </div>}
 
       <div className="stack">
@@ -88,7 +88,7 @@ export default function TryIt({ busy, onStart }: { busy: boolean; onStart: (c: P
         </div>}
         {tab !== "demo" && <div className="row">
           {tab === "real" && <div><label htmlFor="company">Company</label><input id="company" value={f.company} onChange={set("company")} placeholder="Delta Air Lines" /></div>}
-          <div><label htmlFor="number">{tab === "me" ? "Your phone (HoldForMe calls it)" : "Support number (optional)"}</label>
+          <div><label htmlFor="number">{tab === "me" ? "Your phone (the agent calls it)" : "Support number (optional)"}</label>
             <input id="number" type="tel" inputMode="tel" value={f.number} onChange={set("number")} placeholder={tab === "me" ? "(415) 555-0123" : "Exa finds it"} /></div>
         </div>}
         <div><label htmlFor="issue">Issue the agent explains (add a name the rep can ask for)</label><textarea id="issue" rows={2} value={f.issue} onChange={set("issue")} /></div>

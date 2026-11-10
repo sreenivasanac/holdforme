@@ -5,7 +5,7 @@ const HOW = [
   { n: 1, title: "Find the line", by: "Exa", text: "Tell it the company and the problem. Exa search finds the support number and tips for its phone menu." },
   { n: 2, title: "Dial and get through the menu", by: "Vapi + Twilio", text: "Vapi calls from a real phone number. The agent presses keys (DTMF) or says the option that fits your issue." },
   { n: 3, title: "Wait on hold, silently", by: "Deepgram + Jev", text: "Deepgram Nova-3 transcribes the line live. Jev labels each line as hold music, a recorded message, a phone menu, or a live human." },
-  { n: 4, title: "Get the human", by: "Vapi live control", text: "When a person answers, your browser alarms. The call transfers to your phone, or you listen in and type lines, or the agent finishes the job." },
+  { n: 4, title: "Finish the call, or hand it to you", by: "Vapi live control", text: "When a person answers, your browser alarms. In Call for me, the agent finishes the call and sends a summary. In Hold for me, the call transfers to your phone, or you listen in and type lines." },
 ];
 
 const LABELS = [
@@ -17,10 +17,10 @@ const LABELS = [
 
 const FAQ = [
   ["Is the person on the demo line real?", "No. The demo line is a real phone number with a real phone menu, recorded messages, and hold music. After about 50 seconds it connects to Maria, an AI voice that plays a billing rep. Use tab 2 to be the human yourself."],
-  ["Does it work with real companies?", "Yes. Tab 3 calls a real support line. Real hold times can be long, so choose \"Transfer the call to my phone\" and leave the tab open."],
-  ["Why not just use a voicemail-detection feature?", "Answering-machine detection only checks the first seconds of a call. On hold, the line plays many recorded messages that sound like people. HoldForMe checks every line during the whole wait and needs strong evidence before it alerts you."],
+  ["Does it work with real companies?", "Yes. Tab 3 calls a real support line. Real hold times can be long, so choose \"Call for me\" to let the agent finish the call, or \"Hold for me\" to take the call yourself, and leave the tab open."],
+  ["Why not just use a voicemail-detection feature?", "Answering-machine detection only checks the first seconds of a call. On hold, the line plays many recorded messages that sound like people. CallOrHold4Me checks every line during the whole wait and needs strong evidence before it alerts you."],
   ["What if Jev is not available?", "Each line falls back to keyword rules, so the call continues. The chip on each line shows which one labeled it."],
-  ["What does it cost?", "We measured a full demo call (menu, 1 minute of hold, 1 minute with the rep): about $0.18 for the HoldForMe agent in Vapi (Deepgram, GPT-4.1, voice), $0.08 for the AI rep, and about $0.05 in Twilio minutes. So about $0.30 per demo call. On a real call, waiting on hold costs about $0.08 per minute."],
+  ["What does it cost?", "We measured a full demo call (menu, 1 minute of hold, 1 minute with the rep): about $0.18 for the CallOrHold4Me agent in Vapi (Deepgram, GPT-4.1, voice), $0.08 for the AI rep, and about $0.05 in Twilio minutes. So about $0.30 per demo call. On a real call, waiting on hold costs about $0.08 per minute."],
   ["Limits on this public demo", `US and Canada numbers only, no 900/976 lines, ${LIMITS.callsPerIpPerHour} calls per hour per visitor, ${LIMITS.maxActiveCalls} calls at the same time, and ${LIMITS.maxCallSeconds / 60} minutes per call. Calls are recorded by Vapi so you can replay them.`],
 ];
 
@@ -30,7 +30,11 @@ export default function Home() {
       <header className="hero">
         <div className="brand">{APP_NAME}</div>
         <h1>{TAGLINE}</h1>
-        <p className="lead">HoldForMe is an AI agent that calls customer support for you. It gets through the phone menu, waits on hold, and alerts you the moment a real person answers. Then it transfers the call to your phone.</p>
+        <p className="lead">{APP_NAME} is an AI agent that calls customer support for you. It gets through the phone menu and waits on hold. When a real person answers, it finishes the whole call for you, or it alarms you and hands the person to you.</p>
+        <div className="grid2 modes">
+          <div className="card"><h3>Call for me</h3><p>The agent explains your issue, answers the rep&apos;s questions, gets a reference number, and hangs up. You get a summary and a recording.</p></div>
+          <div className="card"><h3>Hold for me</h3><p>The agent waits on hold. When a human answers, your browser alarms and the call transfers to your phone, or you listen live and type lines.</p></div>
+        </div>
         <div className="cta">
           <a className="button" href="#try">Start a demo call</a>
           <a className="button secondary" href={REPO_URL} target="_blank" rel="noreferrer">Source on GitHub</a>
@@ -50,6 +54,7 @@ export default function Home() {
           <li>The agent stays silent through hold music and recorded messages and does not hang up.</li>
           <li>When Maria says {`"Hi, this is Maria"`}, the alarm sounds and the status changes to <b>Human on the line</b>.</li>
           <li>Click <b>Listen live</b> to hear the call. When a human answers, type a line and the agent says it.</li>
+          <li>In <b>Call for me</b> mode (the default), the agent gives the account name, gets the refund and reference number NS48217, repeats it back, and says goodbye.</li>
           <li>When the call ends, you get a summary and a recording.</li>
         </ul>
       </section>

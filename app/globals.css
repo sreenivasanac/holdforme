@@ -102,3 +102,6 @@ footer { text-align: center; color: var(--muted); font-size: 14px; padding-top: 
   .flow { flex-direction: row; }
   .flow li:not(:last-child)::after { content: "→"; position: absolute; right: -10px; top: 50%; transform: translateY(-50%); color: var(--muted); z-index: 1; }
 }
+.modes { max-width: 820px; margin: 0 auto 18px; text-align: left; }
+.modes h3 { margin: 0 0 6px; }
+.modes p { margin: 0; color: #c5cde6; }

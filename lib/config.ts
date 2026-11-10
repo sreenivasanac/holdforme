@@ -1,6 +1,6 @@
 /** Central config and branding. Secrets come from env (.env.local). */
-export const APP_NAME = "HoldForMe";
-export const TAGLINE = "I wait on hold. You get the human.";
+export const APP_NAME = "CallOrHold4Me";
+export const TAGLINE = "I make the call. I wait on hold. I get it done.";
 export const REPO_URL = "https://github.com/sreenivasanac/holdforme";
 /** URL prefix when served under a sub-path (inlined at build time). */
 export const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH || "";
@@ -12,9 +12,9 @@ export const LABEL_TEXT: Record<Label, string> = {
 };
 
 export const HANDOFF_MODES = {
-  transfer: "Transfer the call to my phone",
-  browser: "Alert me and let me listen / type in the browser",
-  agent: "Let the agent explain my issue",
+  agent: "Call for me: the agent handles the whole call",
+  transfer: "Hold for me: transfer the human to my phone",
+  browser: "Hold for me: alert me, I listen and type in the browser",
 } as const;
 export type HandoffMode = keyof typeof HANDOFF_MODES;
 
