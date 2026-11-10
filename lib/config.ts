@@ -42,7 +42,7 @@ export const DEMO = {
 
 export const VOICE = { provider: "deepgram", model: "aura-2", voiceId: "thalia" };
 export const TRANSCRIBER = { provider: "deepgram", model: process.env.DEEPGRAM_STT_MODEL || "nova-3", language: "en" };
-export const LLM = { provider: "openai", model: "gpt-4o-mini" };
+export const LLM = { provider: "openai", model: "gpt-4.1", temperature: 0 };
 
 export const env = {
   vapiKey: process.env.VAPI_API_KEY || "",
