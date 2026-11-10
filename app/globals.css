@@ -16,7 +16,7 @@ p { margin: 0 0 10px; }
 
 /* Hero */
 .hero { text-align: center; padding: 24px 0 8px; }
-.brand { font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: #9fb6ff; font-size: 14px; }
+.brand { font-weight: 800; letter-spacing: .02em; color: #9fb6ff; font-size: 22px; }
 .hero h1 { font-size: clamp(30px, 6vw, 48px); margin: 8px 0 12px; background: linear-gradient(90deg, #fff, #b9c8ff); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .lead { max-width: 680px; margin: 0 auto 18px; color: #c5cde6; font-size: 18px; }
 .cta { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
