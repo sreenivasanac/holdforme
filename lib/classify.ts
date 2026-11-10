@@ -19,10 +19,10 @@ export function classifyRules(text: string): Classification {
 
 const JEV_URL = "https://api.typesafe.ai/v1/systemone";
 const CRITERIA: Record<Label, string> = {
-  hold_music: "Music, tones, or noise while on hold",
-  recorded_message: "Pre-recorded announcement or hold message, e.g. wait times, call recording notice",
+  hold_music: "Music, tones, beeps, or noise while on hold",
+  recorded_message: "Pre-recorded announcement read to every caller, e.g. 'please hold', 'your call is important to us', wait times, call recording notice, company greeting",
   menu_prompt: "Automated phone menu asking to press keys or say an option",
-  live_human: "A real person speaking live and directly to the caller, e.g. greeting, asking name or account",
+  live_human: "A real representative speaking live to this specific caller, e.g. introduces themselves by name ('Hi, this is Maria'), says 'how can I help you', asks for the caller's name or account number, or reacts to what the caller said",
 };
 
 /** Jev (TypeSafe System One) `choice` over recent transcript; falls back to rules on any error. */

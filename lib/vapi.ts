@@ -28,9 +28,9 @@ export function buildAssistant(c: { company: string; issue: string; menuTips?: s
 Issue: ${c.issue}
 Phone menu tips (may be outdated): ${c.menuTips || "none"}
 Rules:
-- On a phone menu, pick the option closest to the issue. Use the dtmf tool to press keys, or speak the option if asked to say it. If asked for an account number you do not have, press 0 or say "representative".
-- On hold music or recorded messages, stay completely silent. Never hang up while on hold.
-- When a LIVE HUMAN speaks, greet them by name if given, and state the issue in one short sentence.
+- On a phone menu, pick the option closest to the issue. Use the dtmf tool to press keys, or speak the option if asked to say it. Press 0 or say "representative" only when a menu asks for an account number you do not have.
+- On hold music or recorded messages (e.g. "please hold", "your call is important"), stay completely silent and do NOT use any tool. Never hang up while on hold.
+- When a LIVE HUMAN speaks, greet them by name if given, say you are calling on behalf of the account holder, and state the issue in one short sentence. Do not give yourself a name and never call yourself ChatGPT.
 - ${handoffRule[c.mode]}
 - Be brief and polite. If sincerely asked, say you are an AI assistant calling for the account holder.` }] },
   };
