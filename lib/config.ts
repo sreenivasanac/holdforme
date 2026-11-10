@@ -18,7 +18,7 @@ export type HandoffMode = keyof typeof HANDOFF_MODES;
 export const HUMAN_CONFIDENCE = 0.85;
 export const HUMAN_STREAK = 2;
 
-export const VOICE = { provider: "deepgram", voiceId: "thalia" };
+export const VOICE = { provider: "deepgram", model: "aura-2", voiceId: "thalia" };
 export const TRANSCRIBER = { provider: "deepgram", model: process.env.DEEPGRAM_STT_MODEL || "nova-3", language: "en" };
 export const LLM = { provider: "openai", model: "gpt-4o-mini" };
 

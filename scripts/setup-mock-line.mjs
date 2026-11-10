@@ -10,7 +10,7 @@ const assistant = await api("/assistant", {
   name: "Mock Comcast support line",
   firstMessage: "Thank you for calling Comcast Xfinity. Calls may be recorded. For billing, press 1. For technical support, press 2.",
   transcriber: { provider: "deepgram", model: "nova-3" },
-  voice: { provider: "deepgram", voiceId: "orion" },
+  voice: { provider: "deepgram", model: "aura-2", voiceId: "orion" },
   model: { provider: "openai", model: "gpt-4o-mini", messages: [{ role: "system", content:
 `You simulate a Comcast customer support phone line for a demo. Follow these phases strictly:
 1. IVR: after the caller presses 1 or says billing, say "Your call is important to us. Please continue to hold. The estimated wait time is 2 minutes."
