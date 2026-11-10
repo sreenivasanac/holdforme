@@ -3,7 +3,7 @@ import { LIMITS, LLM, TRANSCRIBER, VOICE, env, type HandoffMode } from "./config
 const handoffRule: Record<HandoffMode, string> = {
   transfer: "Then say: 'Thank you, I'm connecting the account holder now, one moment.' and stop talking. The system transfers the call.",
   browser: "Then say the account holder is joining in a moment. Keep the rep engaged politely; the account holder may send you lines to say.",
-  agent: "Then resolve the issue yourself: answer the rep's questions with the account details above, ask for a reference number, thank them, and use the endCall tool. If they need information you do not have, say the account holder will call back.",
+  agent: "Then resolve the issue yourself: answer the rep's questions with the account details above and ask for a reference number. Let the rep finish speaking, repeat the reference number back once, say thank you and goodbye, then use the endCall tool. If they need information you do not have, say the account holder will call back.",
 };
 
 /** Transient Vapi assistant: Deepgram ears + voice, DTMF for menus, patient on hold. Transfers are done server-side. */

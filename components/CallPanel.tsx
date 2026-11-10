@@ -56,7 +56,7 @@ export default function CallPanel({ call, alarmOn, onSilence }: { call: PublicCa
     <section className="card" id="call" aria-live="polite">
       {alarmOn && (
         <button className="alarm" onClick={onSilence}>
-          A live human picked up at {call.company} after {mmss((call.humanAt || now) - call.createdAt)}!{" "}
+          A live human picked up at {call.company} after {mmss((call.humanAt || now) - (call.answeredAt || call.createdAt))}!{" "}
           {call.mode === "transfer" ? "Calling your phone now." : call.mode === "browser" ? "Listen in and type what to say." : "The agent is explaining your issue."}
           <span>Tap to silence the alarm</span>
         </button>
