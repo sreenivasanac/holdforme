@@ -17,26 +17,33 @@ export function classifyRules(text: string): Classification {
   return { label: text.split(/\s+/).length < 25 ? "live_human" : "recorded_message", score: 0.5, source: "rules" };
 }
 
-/** Jev `choice` classification over recent transcript; falls back to rules on any error. */
+const JEV_URL = "https://api.typesafe.ai/v1/systemone";
+const CRITERIA: Record<Label, string> = {
+  hold_music: "Music, tones, or noise while on hold",
+  recorded_message: "Pre-recorded announcement or hold message, e.g. wait times, call recording notice",
+  menu_prompt: "Automated phone menu asking to press keys or say an option",
+  live_human: "A real person speaking live and directly to the caller, e.g. greeting, asking name or account",
+};
+
+/** Jev (TypeSafe System One) `choice` over recent transcript; falls back to rules on any error. */
 export async function classify(lines: string[]): Promise<Classification> {
   const latest = lines[lines.length - 1] || "";
-  if (!env.jevKey || !env.jevUrl) return classifyRules(latest);
+  if (!env.jevKey) return classifyRules(latest);
   try {
-    const res = await fetch(env.jevUrl, {
+    const res = await fetch(JEV_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.jevKey}` },
       body: JSON.stringify({
-        primitive: "choice",
-        prompt: "Phone call to customer support. Classify the LATEST line heard from the business side.",
-        input: { recent: lines.slice(-3), latest },
-        choices: ["hold_music", "recorded_message", "menu_prompt", "live_human"],
+        model: "jev-latest",
+        state: { recent_lines: lines.slice(-4, -1), latest_line: latest },
+        questions: { label: { type: "choice", criteria: CRITERIA,
+          instructions: "This is the transcript of what a company phone line just said to a caller waiting for customer support. What is the latest line?" } },
       }),
-      signal: AbortSignal.timeout(2500),
+      signal: AbortSignal.timeout(3000),
     });
-    const j = await res.json();
-    const label = (j.choice ?? j.label) as Label;
-    if (!label) throw new Error("no label");
-    return { label, score: Number(j.score ?? j.confidence ?? 0.7), source: "jev" };
+    const a = (await res.json()).answers?.label;
+    if (!a?.choice) throw new Error("no label");
+    return { label: a.choice as Label, score: Number(a.confidence ?? 0.7), source: "jev" };
   } catch {
     return classifyRules(latest);
   }

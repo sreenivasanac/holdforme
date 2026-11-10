@@ -16,7 +16,7 @@ export type HandoffMode = keyof typeof HANDOFF_MODES;
 export const HUMAN_CONFIDENCE = 0.85;
 export const HUMAN_STREAK = 2;
 
-export const VOICE = { provider: "deepgram", voiceId: "aura-2-thalia-en" };
+export const VOICE = { provider: "deepgram", voiceId: "thalia" };
 export const TRANSCRIBER = { provider: "deepgram", model: process.env.DEEPGRAM_STT_MODEL || "nova-3", language: "en" };
 export const LLM = { provider: "openai", model: "gpt-4o-mini" };
 
@@ -26,6 +26,5 @@ export const env = {
   mockLineNumber: process.env.MOCK_LINE_NUMBER || "",
   exaKey: process.env.EXA_API_KEY || process.env.EXA_API_KEY__EXA_SEARCH || "",
   jevKey: process.env.JEV_API_KEY || "",
-  jevUrl: process.env.JEV_API_URL || "",
   publicBaseUrl: process.env.PUBLIC_BASE_URL || "",
 };
