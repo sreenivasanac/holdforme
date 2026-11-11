@@ -1,0 +1,19 @@
+[project]
+name = "callenvoy"
+version = "1.0.0"
+description = "CallEnvoy: a private phone-call MCP server on Pipecat"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=2.3.0",
+    "pipecat-ai[deepgram,fish,openai,silero,websocket]>=1.15.0",
+    "pywebpush>=2.5.0",
+    "uvicorn>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

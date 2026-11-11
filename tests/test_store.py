@@ -1,0 +1,35 @@
+from callenvoy import calls, store
+
+from .conftest import CALL, run
+
+
+def test_call_lines_questions():
+    v = run(calls.place_call(calls.PlaceCallInput(**CALL)))
+    cid = v["id"]
+    assert store.get_call(cid)["status"] == "dialing"
+    assert store.add_line(cid, "them", "hello") == 0
+    assert store.add_line(cid, "ai", "hi") == 1
+    assert [l["text"] for l in store.lines(cid, 1)] == ["hi"]
+    assert store.next_line(cid) == 2
+    qid = store.add_question(cid, "What is the address?")
+    assert store.get_question(qid)["answer"] is None
+    store.answer_question(qid, "1 Main St")
+    assert store.questions(cid)[0]["answer"] == "1 Main St"
+
+
+def test_profile_merge_and_remove():
+    store.save_profile({"name": "Alex", "voice": "Sarah"})
+    store.save_profile({"details": "x"})
+    assert store.get_profile() == {"name": "Alex", "voice": "Sarah", "details": "x"}
+    store.save_profile({"name": None})
+    assert "name" not in store.get_profile()
+
+
+def test_restart_cleanup_hangs_up_orphans(fresh):
+    v = run(calls.place_call(calls.PlaceCallInput(**CALL)))
+    store.update_call(v["id"], owner_twilio_sid="CAowner")
+    calls.LIVE.clear()
+    run(calls.restart_cleanup())
+    row = store.get_call(v["id"])
+    assert row["status"] == "failed" and row["error"] == "server restarted"
+    assert {sid for sid, kw in fresh.updated if kw.get("hang_up")} == {row["twilio_sid"], "CAowner"}
