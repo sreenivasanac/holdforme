@@ -1,0 +1,10 @@
+{
+  "name": "CallEnvoy",
+  "short_name": "CallEnvoy",
+  "start_url": "/callenvoy/",
+  "scope": "/callenvoy/",
+  "display": "standalone",
+  "background_color": "#0b1020",
+  "theme_color": "#0b1020",
+  "icons": [{ "src": "/callenvoy/icon.png", "sizes": "1024x1024", "type": "image/png", "purpose": "any" }]
+}

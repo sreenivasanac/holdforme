@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="%LANG_ISO_CODE%">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <meta name="theme-color" content="#0b1020" />
+    <title>%WEB_TITLE%</title>
+    <!-- Links carry the /callenvoy prefix by hand (plan section 15). -->
+    <link rel="manifest" href="/callenvoy/manifest.json" />
+    <link rel="apple-touch-icon" href="/callenvoy/icon.png" />
+    <style id="expo-reset">
+      html, body { height: 100%; }
+      body { overflow: hidden; margin: 0; background: #0b1020; color-scheme: dark; }
+      #root { display: flex; height: 100%; flex: 1; }
+      /* Visible keyboard focus for every control (brand colour from theme.ts). */
+      :focus-visible, input:focus, textarea:focus { outline: 2px solid #5b84ff !important; outline-offset: 1px; }
+    </style>
+  </head>
+  <body>
+    <noscript>You need to enable JavaScript to run this app.</noscript>
+    <div id="root"></div>
+  </body>
+</html>
