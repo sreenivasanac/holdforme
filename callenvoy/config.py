@@ -67,6 +67,7 @@ MAX_WAIT_SECONDS = 50  # long-poll ceiling for get_call
 HANDOVER_RECENT_SECONDS = 10  # connect_owner needs a "them" line this recent
 END_CALL_SPEECH_WAIT_SECONDS = 15  # how long end_call waits for the last sentence to finish
 BOT_DONE_GRACE_SECONDS = 30
+KEY_PRESS_REJOIN_SECONDS = 20  # after a key press the call must join its new stream in this time
 DIAL_TIMEOUT_SECONDS = 90  # no answer and no final status from Twilio in this time: the call is closed as failed
 CALLER_ID_CACHE_SECONDS = 60  # GET /api/caller-id caches Twilio's answer this long
 OUTCOMES = ("done", "not_done", "voicemail", "no_human")  # after the bot ends, wait this long for Twilio's final status

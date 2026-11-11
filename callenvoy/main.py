@@ -425,13 +425,16 @@ async def twilio_media(ws: WebSocket, token: str):
         await rep.run(speak_first=True, max_seconds=config.DEMO_REP_MAX_SECONDS)
         return
     call_id = row["id"]
+    live = calls.LIVE.get(call_id)
+    before = live.moved_from if live else None  # set when a key press moved the call to this new stream
     the_bot = bot.CallBot(ws, data["stream_id"], data["call_id"], prompt.build_prompt(row, calls.get_profile()),
-                          config.voice(row["voice"])["reference_id"], call_id=call_id)
+                          config.voice(row["voice"])["reference_id"], call_id=call_id,
+                          messages=bot.resume_messages(before.context.get_messages()) if before else None)
     try:
         await calls.stream_started(call_id, the_bot)
         await the_bot.run()
     finally:
-        await calls.bot_finished(call_id)
+        await calls.bot_finished(call_id, the_bot)
 
 
 @api.websocket("/twilio/owner-media/{call_id}/{token}")

@@ -262,3 +262,48 @@ def test_caller_id_cache(fresh, monkeypatch):
     assert run(calls.caller_id())["verified"] is False and len(asked) == 1  # cached
     run(calls.verify_number())  # clears the cache (and sees it is verified now)
     assert run(calls.caller_id())["verified"] is True
+
+
+class StubBot:
+    """Stands in for bot.CallBot in the key press tests."""
+    def __init__(self):
+        self.moved, self.summaries, self.tap = True, 0, False
+
+    async def summary_if_missing(self):
+        self.summaries += 1
+
+    async def set_tap(self, on):
+        self.tap = on
+
+
+def test_key_press_moves_the_call_to_a_new_stream(fresh):
+    """Twilio plays real digits, then the call joins a new stream with a new one-use token and the next bot."""
+    async def go():
+        cid = (await calls.place_call(calls.PlaceCallInput(**CALL)))["id"]
+        old, new = StubBot(), StubBot()
+        await calls.stream_started(cid, old)
+        await calls.press_keys(cid, "1w2", old)
+        token = store.get_call(cid)["ws_token"]
+        _sid, kw = fresh.updated[-1]
+        assert '<Play digits="1w2"/><Connect><Stream url=' in kw["twiml"] and token in kw["twiml"]
+        await calls.bot_finished(cid, old)  # the old stream closed: the call is still live, with no bot
+        assert calls.LIVE[cid].bot is None and not calls.is_final(store.get_call(cid))
+        await calls.stream_started(cid, new)
+        await asyncio.sleep(0.6)  # the wait for the new stream sees it and stops
+        assert calls.LIVE[cid].bot is new and old.summaries == 0 and len(calls.LIVE[cid].tasks) >= 1
+        await calls.finish(cid)
+    run(go())
+
+
+def test_key_press_then_no_new_stream_closes_the_call(fresh):
+    async def go():
+        cid = (await calls.place_call(calls.PlaceCallInput(**CALL)))["id"]
+        old = StubBot()
+        await calls.stream_started(cid, old)
+        await calls.press_keys(cid, "1", old)
+        await calls.bot_finished(cid, old)
+        await calls.on_status(cid, {"CallStatus": "completed", "CallDuration": "9"})  # the business hung up
+        assert cid in calls.LIVE  # kept until the summary is written
+        await asyncio.sleep(0.7)
+        assert old.summaries == 1 and cid not in calls.LIVE and store.get_call(cid)["ws_token"] is None
+    run(go())

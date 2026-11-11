@@ -319,6 +319,13 @@ async def attach(call_id: str, link: Link) -> None:
     push_state(call_id)
 
 
+async def bot_changed(call_id: str) -> None:
+    """A key press gave the call a new stream and bot: an open owner link must hear the new one."""
+    o, bot = OWNERS.get(call_id), _bot(call_id)
+    if o and o.link and bot:
+        await bot.set_tap(True)
+
+
 async def join(call_id: str) -> None:
     o = get(call_id)
     if o.state == "on_call":

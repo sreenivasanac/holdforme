@@ -174,12 +174,28 @@ def save_outcome(call_id: str, result, summary, details=None) -> None:
                       outcome_summary=str(summary or "")[:1000], outcome_details=json.dumps(details or {}))
 
 
+def resume_messages(messages: list) -> list:
+    """The context for the next stream of the same call (after a key press). A tool call without a finished
+    result would make OpenAI refuse the next request, so every open one gets the result "done"."""
+    done = {m.get("tool_call_id") for m in messages if isinstance(m, dict) and m.get("role") == "tool"}
+    out = []
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "tool" and m.get("content") == "IN_PROGRESS":
+            m = {**m, "content": "done"}
+        out.append(m)
+        if isinstance(m, dict) and m.get("role") == "assistant":
+            out += [{"role": "tool", "tool_call_id": c["id"], "content": "done"}
+                    for c in m.get("tool_calls") or [] if c["id"] not in done]
+    return out
+
+
 class CallBot:
     """One pipeline for one phone leg. With call_id None it is the demo rep (no call row, only end_call)."""
 
     def __init__(self, websocket, stream_sid: str, twilio_call_sid: str, system_prompt: str, voice_id: str,
-                 call_id: str | None = None):
+                 call_id: str | None = None, messages: list | None = None):
         self.call_id = call_id
+        self.moved = False  # a key press moved the call to a new stream: this bot ends without a summary
         self.twilio_call_sid = twilio_call_sid
         self.owner_name = "the account holder"
         self.released = asyncio.Event()  # set while the AI has the call (not the owner)
@@ -200,7 +216,7 @@ class CallBot:
         tts = FishAudioTTSService(api_key=config.env("FISH_API_KEY"), settings=FishAudioTTSService.Settings(
             model=config.TTS_MODEL, voice=voice_id))
         names = list(TOOLS) if call_id else ["end_call"]
-        self.context = LLMContext(messages=[{"role": "system", "content": system_prompt}],
+        self.context = LLMContext(messages=messages or [{"role": "system", "content": system_prompt}],
                                   tools=ToolsSchema(standard_tools=[TOOLS[n] for n in names]))
         self.aggs = LLMContextAggregatorPair(self.context, user_params=LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer()))
@@ -254,8 +270,8 @@ class CallBot:
             if limit:
                 limit.cancel()
             await self._stop_owner_stt()
-            if self.call_id:
-                await self._summary_if_missing()
+            if self.call_id and not self.moved:
+                await self.summary_if_missing()
 
     async def _limit(self, seconds: float) -> None:
         await asyncio.sleep(seconds)
@@ -351,7 +367,7 @@ class CallBot:
                 pass
         self.owner_stt = self.owner_runner = None
 
-    async def _summary_if_missing(self) -> None:
+    async def summary_if_missing(self) -> None:
         """The other side hung up before end_call: one short GPT request writes the outcome from the transcript."""
         row = store.get_call(self.call_id)
         if not row or row["outcome_result"]:
@@ -385,7 +401,14 @@ class CallBot:
             return
         store.update_call(self.call_id, phase="menu")
         calls.event(self.call_id, f"pressed {digits.replace('w', '')}")
-        await self.gate.press(digits)
+        self.moved = True
+        try:
+            await calls.press_keys(self.call_id, digits, self)
+        except Exception as e:  # noqa: BLE001
+            self.moved = False
+            log.warning("key press failed for %s: %s", self.call_id, e)
+            await params.result_callback("The key press failed. Try once more.")
+            return
         await params.result_callback("pressed", properties=NO_LLM)
 
     async def _tool_wait(self, params) -> None:

@@ -157,3 +157,13 @@ def test_demo_rep_hard_limit(make_bot, fresh):
         await rep._limit(0.01)
         assert fresh.updated == [("CA1", {"hang_up": True})] and stopped
     run(go())
+
+
+def test_resume_messages_closes_open_tool_calls():
+    msgs = [{"role": "system", "content": "p"},
+            {"role": "assistant", "tool_calls": [{"id": "a", "function": {"name": "press_digits"}}]},
+            {"role": "tool", "tool_call_id": "a", "content": "IN_PROGRESS"},
+            {"role": "assistant", "tool_calls": [{"id": "b", "function": {"name": "wait"}}]}]
+    out = bot.resume_messages(msgs)
+    assert [m.get("content") for m in out if m["role"] == "tool"] == ["done", "done"]
+    assert out[-1] == {"role": "tool", "tool_call_id": "b", "content": "done"} and msgs[2]["content"] == "IN_PROGRESS"

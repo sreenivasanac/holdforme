@@ -52,9 +52,9 @@ async def create_call(*, to: str, url: str, status_callback: str, record: bool =
     return (await _post("Calls.json", data))["sid"]
 
 
-async def update_call(sid: str, *, hang_up: bool = True) -> None:
-    """Hangs up a live call. TODO: Twilio <Play digits> fallback (redirect with Twiml) if in-band tones fail."""
-    await _post(f"Calls/{sid}.json", [("Status", "completed")])
+async def update_call(sid: str, *, hang_up: bool = True, twiml: str | None = None) -> None:
+    """Hangs up a live call, or with `twiml` makes the call leave its current TwiML and run this document."""
+    await _post(f"Calls/{sid}.json", [("Twiml", twiml)] if twiml else [("Status", "completed")])
 
 
 def twiml(body: str) -> str:

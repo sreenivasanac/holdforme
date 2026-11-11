@@ -13,7 +13,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import config, guard, owner, store, twilio_api
+from . import config, demo_line, guard, owner, store, twilio_api
 
 log = logging.getLogger("callenvoy.calls")
 
@@ -85,6 +85,7 @@ class Live:
     event: asyncio.Event = field(default_factory=asyncio.Event)  # set and replaced on every change
     bot: Any = None  # bot.CallBot while the stream runs
     bot_done: bool = False
+    moved_from: Any = None  # the bot of the stream that a key press closed, until the next stream takes over
     futures: dict[str, asyncio.Future] = field(default_factory=dict)  # pending ask_user answers
     tasks: list[asyncio.Task] = field(default_factory=list)  # watchdog, grace timers
     last_them: float = 0.0  # monotonic time of the last line from the other side
@@ -493,6 +494,40 @@ async def inbound_done(call_id: str, form: dict) -> None:
         await finish(call_id)
 
 
+async def press_keys(call_id: str, digits: str, bot) -> None:
+    """Sends real key signals (RFC 2833) to the business.
+
+    Twilio cannot send keys on an open media stream, and tones in the stream audio are not key presses for
+    every menu (a Twilio menu ignores them; tested with 120 and 300 ms tones). So the call leaves its stream,
+    Twilio plays the digits, and the call joins a new stream. The next bot continues with this bot's context."""
+    row, live = must(call_id), LIVE[call_id]
+    token = secrets.token_urlsafe(32)
+    store.update_call(call_id, ws_token=token)
+    live.moved_from = bot
+    try:
+        await twilio_api.update_call(row["twilio_sid"], hang_up=False, twiml=twilio_api.twiml(
+            f'<Play digits="{digits}"/>' + demo_line.stream(f"/twilio/media/{token}")))
+    except Exception:
+        live.moved_from = None
+        store.update_call(call_id, ws_token=None)
+        raise
+
+
+async def _stream_lost(call_id: str, bot) -> None:
+    """A key press closed the stream. If the next stream does not come (the business hung up), close the call."""
+    live = LIVE[call_id]
+    for _ in range(config.KEY_PRESS_REJOIN_SECONDS * 2):
+        await asyncio.sleep(0.5)
+        if live.moved_from is not bot:  # the next stream took over
+            return
+        if is_final(must(call_id)):
+            break
+    live.moved_from = None
+    store.update_call(call_id, ws_token=None)
+    await bot.summary_if_missing()
+    await bot_finished(call_id)
+
+
 # --- Twilio events ---
 
 TWILIO_STATUS = {"queued": "dialing", "initiated": "dialing", "ringing": "dialing", "in-progress": "in_progress",
@@ -525,7 +560,7 @@ async def on_status(call_id: str, form: dict, leg: str = "business") -> None:
         live = LIVE.get(call_id)
         if live and live.bot and not live.bot_done:
             await live.bot.stop()  # the bot writes the summary, then calls bot_finished
-        else:
+        elif not (live and live.moved_from):  # else _stream_lost writes the summary and finishes
             await finish(call_id)
     elif status == "in_progress" and not row["answered_at"]:
         store.update_call(call_id, status=status, answered_at=store.now())
@@ -536,7 +571,11 @@ async def on_status(call_id: str, form: dict, leg: str = "business") -> None:
 async def stream_started(call_id: str, bot) -> None:
     row = must(call_id)
     live = LIVE.setdefault(call_id, Live())
+    again, live.moved_from = live.moved_from is not None, None
     live.bot = bot
+    if again:  # the stream after a key press: the call, its watchdog and the owner's link are already running
+        await owner.bot_changed(call_id)
+        return
     fields = {"status": "in_progress"}
     if not row["answered_at"]:
         fields["answered_at"] = store.now()
@@ -546,8 +585,13 @@ async def stream_started(call_id: str, bot) -> None:
         await owner.listen_in(call_id)
 
 
-async def bot_finished(call_id: str) -> None:
+async def bot_finished(call_id: str, bot=None) -> None:
     live = LIVE.get(call_id)
+    if live and bot is not None and bot.moved:  # a key press closed this stream; the call goes on
+        if live.bot is bot:
+            live.bot = None
+            spawn(call_id, _stream_lost(call_id, bot))
+        return
     if live:
         live.bot_done = True
         live.bot = None
