@@ -180,6 +180,16 @@ def test_inbound_row_and_business_name():
     assert view["direction"] == "inbound" and view["finished"] and view["calling_number"] == "+14155550199"
 
 
+def test_final_status_with_a_recording_id_ends_the_call(fresh):
+    """Twilio adds RecordingSid to the "completed" status of a recorded call; it is not a recording callback."""
+    cid = place()["id"]
+    run(calls.on_status(cid, {"CallStatus": "completed", "CallDuration": "42", "RecordingSid": "RE1"}))
+    row = store.get_call(cid)
+    assert row["status"] == "completed" and row["talk_seconds"] == 42 and not row["recording_sid"]
+    run(calls.on_status(cid, {"RecordingSid": "RE1", "RecordingStatus": "completed", "RecordingDuration": "40"}))
+    assert store.get_call(cid)["recording_sid"] == "RE1"
+
+
 def test_late_dialing_does_not_overwrite_a_final_status(fresh, monkeypatch):
     """Fix 3a: Twilio's final status can arrive before create_call returns."""
     from callenvoy import twilio_api

@@ -1,6 +1,9 @@
 """The real owner gates and the bot's tool handlers (no services are contacted, no network)."""
 
 import asyncio
+import math
+import struct
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -8,7 +11,6 @@ from pipecat.frames.frames import (
     InterruptionFrame,
     LLMContextFrame,
     OutputAudioRawFrame,
-    OutputDTMFFrame,
     TextFrame,
     TTSAudioRawFrame,
 )
@@ -39,14 +41,12 @@ def test_closed_gates_block_the_llm_both_ways(gate_cls):
                  expected_up_frames=[LLMContextFrame]))
 
 
-def test_owner_gate_closed_drops_bot_audio_keys_and_interruptions():
+def test_owner_gate_closed_drops_bot_audio_and_interruptions():
     gate = bot.OwnerGate()
     gate.closed = True
-    run(run_test(gate, frames_to_send=[InterruptionFrame(), TTSAudioRawFrame(b"\0" * 320, 8000, 1),
-                                       OutputDTMFFrame.from_string("1"), TextFrame("x")],
+    run(run_test(gate, frames_to_send=[InterruptionFrame(), TTSAudioRawFrame(b"\0" * 320, 8000, 1), TextFrame("x")],
                  expected_down_frames=[TextFrame]))
-    run(run_test(bot.OwnerGate(), frames_to_send=[InterruptionFrame(), OutputDTMFFrame.from_string("1")],
-                 expected_down_frames=[InterruptionFrame, OutputDTMFFrame]))
+    run(run_test(bot.OwnerGate(), frames_to_send=[InterruptionFrame()], expected_down_frames=[InterruptionFrame]))
 
 
 def test_owner_audio_and_keys_pass_a_closed_gate():
@@ -61,7 +61,29 @@ def test_owner_audio_and_keys_pass_a_closed_gate():
     run(gate.feed(b"\1\0" * 320, 16000))
     run(gate.press("5"))
     assert isinstance(pushed[0], OutputAudioRawFrame) and pushed[0].sample_rate == 16000
-    assert isinstance(pushed[1], OutputDTMFFrame) and pushed[1].to_string() == "5"
+    assert isinstance(pushed[1], OutputAudioRawFrame) and pushed[1].audio == bot.dtmf_pcm("5")
+
+
+def _power(pcm: bytes, hz: int) -> float:
+    """Strength of one frequency in the first 120 ms of 8 kHz PCM (a plain correlation)."""
+    xs = struct.unpack(f"<{len(pcm) // 2}h", pcm)[:960]
+    return math.hypot(sum(x * math.cos(2 * math.pi * hz * n / 8000) for n, x in enumerate(xs)),
+                      sum(x * math.sin(2 * math.pi * hz * n / 8000) for n, x in enumerate(xs)))
+
+
+def test_key_tone_has_the_right_two_frequencies_and_length():
+    pcm = bot.dtmf_pcm("5")
+    assert len(pcm) == 2 * 8000 * 200 // 1000  # 120 ms tone and 80 ms gap
+    assert len(bot.dtmf_pcm("1w#")) == 2 * 8000 * 900 // 1000
+    strong = {hz for hz in bot.DTMF_ROWS + bot.DTMF_COLS if _power(pcm, hz) > 1e6}
+    assert strong == {770, 1336}
+    assert max(abs(x) for x in struct.unpack(f"<{len(pcm) // 2}h", pcm)) <= 16382  # no clipping
+
+
+def test_interruption_does_not_cut_a_key_tone():
+    gate = bot.OwnerGate()
+    gate.tones_until = time.monotonic() + 5  # as press() sets it
+    run(run_test(gate, frames_to_send=[InterruptionFrame(), TextFrame("x")], expected_down_frames=[TextFrame]))
 
 
 class Params:

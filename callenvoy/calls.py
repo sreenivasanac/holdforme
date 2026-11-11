@@ -504,7 +504,9 @@ async def on_status(call_id: str, form: dict, leg: str = "business") -> None:
     row = store.get_call(call_id)
     if not row:
         return
-    if form.get("RecordingSid"):
+    # Twilio also puts RecordingSid in the final call status when the call is recorded, so only a callback
+    # without CallStatus is the recording callback. (The first real call stayed "in progress" because of this.)
+    if form.get("RecordingSid") and "CallStatus" not in form:
         if form.get("RecordingStatus", "completed") == "completed":
             store.update_call(call_id, recording_sid=form["RecordingSid"],
                               recording_seconds=int(form.get("RecordingDuration") or 0),

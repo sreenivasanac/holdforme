@@ -46,7 +46,8 @@ def quiet_logs() -> None:
     """Pipecat logs every spoken sentence at DEBUG and httpx logs URLs with phone numbers at INFO (plan 22.4)."""
     loguru_logger.remove()
     loguru_logger.add(sys.stderr, level="WARNING")
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    for name in ("httpx", "openai", "mcp.server.streamable_http"):  # one INFO line per request, no value
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 # --- MCP (stateless, plain JSON). transport_security is required: the SDK otherwise only accepts Host: localhost. ---

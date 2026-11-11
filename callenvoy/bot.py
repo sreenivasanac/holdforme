@@ -13,7 +13,9 @@ the bot's key tones, its late speech and interruptions; the tools that act on th
 import asyncio
 import json
 import logging
+import math
 import re
+import struct
 import time
 
 from openai import AsyncOpenAI
@@ -31,7 +33,6 @@ from pipecat.frames.frames import (
     LLMMessagesAppendFrame,
     LLMRunFrame,
     OutputAudioRawFrame,
-    OutputDTMFFrame,
     TranscriptionFrame,
     TTSAudioRawFrame,
 )
@@ -54,6 +55,28 @@ log = logging.getLogger("callenvoy.bot")
 DIGITS = re.compile(r"^[0-9*#w]{1,20}$")
 NO_LLM = FunctionCallResultProperties(run_llm=False)
 
+# Key tones played into the call audio. Timing and level follow Call4me's voice/dtmf.ts (MIT): 120 ms tone,
+# 80 ms gap, each of the two frequencies at a quarter of full scale (about -9 dBm0); "w" is half a second of
+# silence. Pipecat's bundled tone files are much quieter, and the first real call showed the real problem:
+# the menu was still talking, so an interruption cut the tone after 80 ms and the menu never heard the key.
+DTMF_ROWS, DTMF_COLS, DTMF_KEYS = (697, 770, 852, 941), (1209, 1336, 1477), ("123", "456", "789", "*0#")
+DTMF_TONE_MS, DTMF_GAP_MS, DTMF_WAIT_MS, DTMF_RATE = 120, 80, 500, 8000
+
+
+def dtmf_pcm(digits: str) -> bytes:
+    """16-bit mono PCM at 8 kHz for `digits` (0-9 * # and w)."""
+    silence = lambda ms: [0] * (DTMF_RATE * ms // 1000)  # noqa: E731
+    out: list[int] = []
+    for key in digits:
+        if key == "w":
+            out += silence(DTMF_WAIT_MS)
+            continue
+        row = next(i for i, keys in enumerate(DTMF_KEYS) if key in keys)
+        lo, hi = DTMF_ROWS[row], DTMF_COLS[DTMF_KEYS[row].index(key)]
+        out += [int(8191 * (math.sin(2 * math.pi * lo * n / DTMF_RATE) + math.sin(2 * math.pi * hi * n / DTMF_RATE)))
+                for n in range(DTMF_RATE * DTMF_TONE_MS // 1000)] + silence(DTMF_GAP_MS)
+    return struct.pack(f"<{len(out)}h", *out)
+
 
 class LLMGate(FrameProcessor):
     """Before the LLM: while closed, drops LLMContextFrame (in both directions), so the LLM does not run.
@@ -72,18 +95,21 @@ class LLMGate(FrameProcessor):
 class OwnerGate(LLMGate):
     """Before transport.output. While closed it also drops the AI's late speech, its key tones and
     InterruptionFrame (the other side starting to talk must not cut the owner's audio), and the upstream
-    LLMContextFrame of a function result. feed() and press() push the owner's audio and keys past the gate."""
+    LLMContextFrame of a function result. feed() and press() push the owner's audio and keys past the gate.
+    While key tones play, InterruptionFrame is dropped too: a menu that keeps talking must not cut a tone."""
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.bot_speaking = False
+        self.tones_until = 0.0  # time.monotonic() until which key tones are playing
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         if isinstance(frame, BotStartedSpeakingFrame):
             self.bot_speaking = True
         elif isinstance(frame, BotStoppedSpeakingFrame):
             self.bot_speaking = False
-        if self.closed and isinstance(frame, (InterruptionFrame, TTSAudioRawFrame, OutputDTMFFrame)):
+        if (self.closed and isinstance(frame, (InterruptionFrame, TTSAudioRawFrame))) or (
+                isinstance(frame, InterruptionFrame) and time.monotonic() < self.tones_until):
             await FrameProcessor.process_frame(self, frame, direction)
             return
         await super().process_frame(frame, direction)
@@ -92,7 +118,9 @@ class OwnerGate(LLMGate):
         await self.push_frame(OutputAudioRawFrame(audio=pcm, sample_rate=sample_rate, num_channels=1))
 
     async def press(self, digits: str) -> None:
-        await self.push_frame(OutputDTMFFrame.from_string(digits))
+        pcm = dtmf_pcm(digits)
+        self.tones_until = time.monotonic() + len(pcm) / 2 / DTMF_RATE + 0.3  # 0.3 s for the output queue
+        await self.feed(pcm, DTMF_RATE)
 
     async def cut(self) -> None:
         """Cuts the bot's current speech: one InterruptionFrame both ways (stops LLM/TTS, empties the output queue)."""
@@ -357,11 +385,7 @@ class CallBot:
             return
         store.update_call(self.call_id, phase="menu")
         calls.event(self.call_id, f"pressed {digits.replace('w', '')}")
-        for i, chunk in enumerate(digits.split("w")):
-            if i:
-                await asyncio.sleep(0.5)
-            if chunk:
-                await params.llm.push_frame(OutputDTMFFrame.from_string(chunk))
+        await self.gate.press(digits)
         await params.result_callback("pressed", properties=NO_LLM)
 
     async def _tool_wait(self, params) -> None:
