@@ -1,6 +1,7 @@
 """The three Twilio REST calls CallEnvoy needs, with httpx and basic auth (no Twilio SDK)."""
 
 from collections.abc import AsyncIterator
+from urllib.parse import urlencode
 
 import httpx
 
@@ -22,8 +23,10 @@ def _url(path: str) -> str:
 
 
 async def _post(path: str, data: list[tuple[str, str]]) -> dict:
+    # httpx form-encodes only a mapping; it treats a list as a raw byte stream and fails in an AsyncClient.
+    # Twilio needs repeated keys (StatusCallbackEvent), so the pairs are encoded here.
     async with httpx.AsyncClient(auth=_auth(), timeout=15) as c:
-        r = await c.post(_url(path), data=data)
+        r = await c.post(_url(path), content=urlencode(data), headers={"Content-Type": "application/x-www-form-urlencoded"})
     if r.status_code >= 400:
         try:
             msg = r.json().get("message", "")

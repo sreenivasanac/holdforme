@@ -31,26 +31,29 @@ def test_recording_order_and_no_record_params(fresh):
 from callenvoy.twilio_api import create_call as REAL_CREATE  # noqa: E402  (taken before the fixture fakes it)
 
 
-def test_create_call_sends_no_recording_fields_when_off(monkeypatch):
+def test_create_call_sends_a_real_form_body(monkeypatch):
+    """Goes through httpx itself: a list passed as `data=` is not form-encoded and fails in an AsyncClient."""
+    from functools import partial
+    from urllib.parse import parse_qs
+
     import httpx
 
     from callenvoy import twilio_api
 
     sent = {}
 
-    class Client:
-        def __init__(self, **kw): ...
-        async def __aenter__(self): return self
-        async def __aexit__(self, *a): ...
-        async def post(self, url, data):
-            sent["data"] = data
-            return httpx.Response(201, json={"sid": "CA1"})
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent["type"] = request.headers["content-type"]
+        sent["form"] = parse_qs(request.content.decode())
+        return httpx.Response(201, json={"sid": "CA1"})
 
-    monkeypatch.setattr(twilio_api.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(twilio_api.httpx, "AsyncClient", partial(httpx.AsyncClient, transport=httpx.MockTransport(handler)))
     assert run(REAL_CREATE(to="+14155550123", url="u", status_callback="s", record=False)) == "CA1"
-    assert not {k for k, _ in sent["data"]} & {"Record", "RecordingChannels", "RecordingStatusCallback"}
+    assert sent["type"] == "application/x-www-form-urlencoded" and sent["form"]["To"] == ["+14155550123"]
+    assert sent["form"]["StatusCallbackEvent"] == ["initiated", "ringing", "answered", "completed"]
+    assert not set(sent["form"]) & {"Record", "RecordingChannels", "RecordingStatusCallback"}
     run(REAL_CREATE(to="+14155550123", url="u", status_callback="s", record=True))
-    assert ("RecordingChannels", "dual") in sent["data"] and ("Record", "true") in sent["data"]
+    assert sent["form"]["RecordingChannels"] == ["dual"] and sent["form"]["Record"] == ["true"]
 
 
 def test_settings_order_and_bad_values():
