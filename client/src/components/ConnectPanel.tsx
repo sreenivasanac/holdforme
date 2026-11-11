@@ -1,15 +1,15 @@
 import { useState } from 'react';
 import { Clipboard, StyleSheet, Text, View } from 'react-native';
-import { useSession } from '../hooks';
+import { useSession, useSettings } from '../hooks';
 import { border, color, font, radius, space, useWide } from '../theme';
 import { Button, Card, Note, T, text } from './ui';
 
 const MASK = '••••••••••••••••';
-export const DEFAULT_MCP_URL = 'https://pragnyalabs.com/callenvoy/mcp';
 
 /** MCP install steps. The key is masked until "Show key"; Copy always copies the real key. */
-export function ConnectPanel({ mcpUrl = DEFAULT_MCP_URL }: { mcpUrl?: string }) {
+export function ConnectPanel() {
   const { key } = useSession();
+  const mcpUrl = useSettings().config?.mcp_url ?? '';
   const wide = useWide();
   const [show, setShow] = useState(false);
   const k = key ?? '';
@@ -38,6 +38,7 @@ export function ConnectPanel({ mcpUrl = DEFAULT_MCP_URL }: { mcpUrl?: string }) 
     },
   ];
 
+  if (!mcpUrl) return null; // the server config (with the MCP address) is still loading
   return (
     <Card label="Connect an agent">
       <View style={s.stack}>

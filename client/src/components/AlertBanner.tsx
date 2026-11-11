@@ -1,7 +1,7 @@
-import { router, usePathname } from 'expo-router';
+import { usePathname } from 'expo-router';
 import { StyleSheet, Text, View } from 'react-native';
 import type { Call } from '../api';
-import { useCalls, useNow } from '../hooks';
+import { useCalls, useGo, useNow } from '../hooks';
 import { color, font, radius, space, useWide } from '../theme';
 import { Button } from './ui';
 
@@ -12,6 +12,7 @@ export function secondsLeft(call: Call, now: number) {
 /** Green banner on every screen while a call is alerting the owner. */
 export function AlertBanner() {
   const { calls, acknowledge } = useCalls();
+  const go = useGo();
   const now = useNow();
   const wide = useWide();
   const path = usePathname();
@@ -23,16 +24,16 @@ export function AlertBanner() {
   const phoneNext = transfer && call.reach === 'app_then_phone' && !!left;
   const open = () => {
     acknowledge(call.id);
-    router.push(`/calls/${call.id}`);
+    go(`/calls/${call.id}`);
   };
   return (
-    <View role="alert" style={s.banner}>
+    <View style={s.banner}>
       <View style={s.textBox}>
-        <Text style={s.title}>A person answered at {call.business}</Text>
-        <Text style={s.sub}>
-          {transfer ? 'Join now' : 'Listen in'}
-          {phoneNext ? `, or your phone rings in ${left} s.` : '.'}
+        {/* Only the fixed text is announced; the seconds stay out of the live region. */}
+        <Text role="alert" style={s.title}>
+          A person answered at {call.business}
         </Text>
+        <Text style={s.sub}>{(transfer ? 'Join now' : 'Listen in') + (phoneNext ? `, or your phone rings in ${left} s.` : '.')}</Text>
       </View>
       <View style={[s.actions, !wide && s.actionsNarrow]}>
         <View style={!wide && s.grow}>

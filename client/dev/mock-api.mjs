@@ -2,6 +2,9 @@
 // Not part of the export. Serves client/dist under /callenvoy too, so the real export can be checked.
 //   node dev/mock-api.mjs            -> http://localhost:3020/callenvoy/   (API key: dev-key)
 //   POST /__mock/calls?set=empty|many  switches the call list
+//   POST /__mock/socket?id=<call>&send=replaced|error|drop   acts on that call's open audio socket
+//   POST /__mock/alert?id=<call>&state=alerting|none&seconds=20   starts or ends an alert (a new alert_until each time)
+//   GET  /__mock/count?id=<call>                           how often GET /api/calls/<id> was asked
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -31,10 +34,15 @@ const profile = {
   voice: 'Hannah', record_calls: true, max_minutes: 30, mode: 'handle', reach: 'app_then_phone', alert_wait_seconds: 20,
   phone_ring_seconds: 25, no_answer: 'ai_handles', alert_on_human: true, listen_in: false, alert_sound: true,
   alert_notification: true, alert_push: true, push_shows_business: true, caller_id: 'callenvoy', leave_voicemail: true,
-  name_pronunciation: '', assistant_name: '', email: 'dana@example.com', address: '', date_of_birth: '',
-  insurance_carrier: '', insurance_member_id: '', insurance_group_number: '', dental_insurance_carrier: '',
-  dental_insurance_member_id: '', vehicle: '', vin: '', frequent_flyer_numbers: '', known_traveler_number: '', redress_number: '',
+  name_pronunciation: null, assistant_name: null, email: 'dana@example.com', address: null, date_of_birth: null,
+  insurance_carrier: null, insurance_member_id: null, insurance_group_number: null, dental_insurance_carrier: null,
+  dental_insurance_member_id: null, vehicle: null, vin: null, frequent_flyer_numbers: null, known_traveler_number: null, redress_number: null,
 };
+// As the server's config.SETTINGS: text fields with their max length, int fields with their range.
+const TEXT_LIMITS = { name: 80, details: 3000, name_pronunciation: 80, assistant_name: 30, email: 120, address: 300, date_of_birth: 40,
+  insurance_carrier: 80, insurance_member_id: 60, insurance_group_number: 60, dental_insurance_carrier: 80, dental_insurance_member_id: 60,
+  vehicle: 120, vin: 40, frequent_flyer_numbers: 300, known_traveler_number: 40, redress_number: 40 };
+const RANGES = { max_minutes: [1, 120], alert_wait_seconds: [5, 120], phone_ring_seconds: [10, 60] };
 let verifiedAt = 0; // caller ID: verified 10 s after Verify
 
 const line = (n, sAgo, who, text) => ({ n, t: iso(sAgo * 1000), who, text });
@@ -50,7 +58,7 @@ const base = (id, over) => ({
   goal: 'My bill went from $65 to $130 after a plan change I did not ask for. Get the plan change reversed and the extra charge credited. Ask for a reference number.',
   mode: 'handle', connect_when: null, reach: 'app_then_phone', listen_in: false, alert_on_human: true, recorded: true, leave_voicemail: true,
   calling_number: '+19186021019', human_at: null, owner: { state: 'none', via: null, alert_until: null, unreachable: false },
-  open_questions: [], answered_questions: [], outcome: null, talk_seconds: null, owner_seconds: null, error: null,
+  open_questions: [], answered_questions: [], outcome: null, talk_seconds: 0, owner_seconds: 0, error: null,
   created_at: iso(11 * MIN), ended_at: null, transcript: [], next_line: 0, recordings: [], ...over,
 });
 
@@ -80,17 +88,22 @@ function sampleCalls() {
       ended_at: iso(3 * 24 * 60 * MIN), talk_seconds: 0, error: 'Twilio could not place the call: the number is not reachable.' }),
     base('c_in', { direction: 'inbound', business: 'Northstar Internet', number: '+16562405137', status: 'completed', phase: null, finished: true, recorded: false,
       created_at: iso(30 * MIN), ended_at: iso(28 * MIN), talk_seconds: 95, goal: '', calling_number: null }),
+    // A business calling back right now: forwarded to the owner's phone.
+    base('c_in_live', { direction: 'inbound', business: 'Northstar Internet', number: '+16562405137', phase: null, recorded: false,
+      created_at: iso(MIN), talk_seconds: 60, goal: '', calling_number: null }),
   ];
 }
 let calls = sampleCalls();
 let alertStart = Date.now();
+let alertLen = 20_000;
 
 function live(c) {
   // The alert repeats every 30 s so the countdown can be seen.
-  if (c.id === 'c_alert' && c.owner.state === 'alerting') {
-    if (Date.now() - alertStart > 20_000) alertStart = Date.now();
-    c.owner.alert_until = new Date(alertStart + 20_000).toISOString();
+  if (c.id === 'c_alert' && (c.owner.state === 'alerting' || c.pending)) {
+    if (Date.now() - alertStart > alertLen) alertStart = Date.now();
+    c.owner.alert_until = new Date(alertStart + alertLen).toISOString();
   }
+  if (!c.finished) c.talk_seconds = Math.round((Date.now() - Date.parse(c.created_at)) / 1000);
   // A call placed from the form moves dialing -> menu -> on hold.
   if (c.placedAt && !c.finished) {
     const s = (Date.now() - c.placedAt) / 1000;
@@ -110,22 +123,34 @@ const send = (res, status, body) => {
 const readBody = (req) => new Promise((ok) => { let d = ''; req.on('data', (c) => (d += c)); req.on('end', () => { try { ok(JSON.parse(d || '{}')); } catch { ok({}); } }); });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const tickets = new Set();
+const sockets = new Map(); // call id -> the open audio socket
+const counts = {}; // call id -> GET /api/calls/<id> requests
 
 async function api(req, res, p, q) {
   if (req.headers.authorization !== `Bearer ${KEY}`) return send(res, 401, { detail: 'Unauthorized' });
   const m = req.method;
   if (p === '/api/config') return send(res, 200, { app_name: 'CallEnvoy', mcp_url: 'https://pragnyalabs.com/callenvoy/mcp', voices: VOICES,
-    limits: { max_call_minutes: 120, max_concurrent_calls: 2, daily_minute_cap: 240, minutes_used_today: 34 }, vapid_public_key: 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U' });
+    limits: { max_call_minutes: 120, max_concurrent_calls: 2, daily_minute_cap: 240, minutes_used_today: 34 },
+    defaults: Object.fromEntries(Object.keys(profile).map((k) => [k, null])), // not used by the console
+    choices: { caller_id: ['callenvoy', 'own'], mode: ['handle', 'transfer'], reach: ['app', 'phone', 'app_then_phone'], no_answer: ['ai_handles', 'end_politely'] },
+    ranges: RANGES, text_limits: TEXT_LIMITS, vapid_public_key: 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U' });
   if (p === '/api/profile' && m === 'GET') return send(res, 200, profile);
   if (p === '/api/profile' && m === 'PUT') {
     const b = await readBody(req);
     if (b.max_minutes != null && (b.max_minutes < 1 || b.max_minutes > 120)) return send(res, 400, { detail: 'max_minutes must be 1-120.', field: 'max_minutes' });
     if (b.caller_id === 'own' && !(verifiedAt && Date.now() > verifiedAt)) return send(res, 400, { detail: 'Verify your callback number before you use it as caller ID.', field: 'caller_id' });
-    Object.assign(profile, b);
+    for (const [k, v] of Object.entries(b)) if (TEXT_LIMITS[k] && typeof v === 'string' && v.length > TEXT_LIMITS[k]) return send(res, 400, { detail: `At most ${TEXT_LIMITS[k]} characters.`, field: k });
+    if (/^x+$/i.test(b.vin ?? '')) return send(res, 400, { detail: 'That is not a VIN.', field: 'vin' }); // to see a field error inside a closed group
+    // As save_profile: null is skipped, "" clears the field.
+    for (const [k, v] of Object.entries(b)) if (v !== null && k in profile) profile[k] = v === '' ? null : v;
     return send(res, 200, profile);
   }
   if (p === '/api/caller-id') return send(res, 200, { number: profile.callback_number || null, verified: !!verifiedAt && Date.now() > verifiedAt });
-  if (p === '/api/caller-id/verify') { verifiedAt = Date.now() + 10_000; return send(res, 200, { validation_code: '482913' }); }
+  if (p === '/api/caller-id/verify') {
+    if (verifiedAt && Date.now() > verifiedAt) return send(res, 200, { validation_code: null }); // already verified with Twilio
+    verifiedAt = Date.now() + 10_000;
+    return send(res, 200, { validation_code: '482913' });
+  }
   if (p === '/api/push/test') return send(res, 200, { sent: 2 });
   if (p === '/api/push/subscriptions') return send(res, 200, { ok: true });
   if (p === '/api/calls' && m === 'GET') return send(res, 200, calls.map((c) => ({ ...live(c), transcript: undefined })));
@@ -142,6 +167,7 @@ async function api(req, res, p, q) {
   const c = cm && calls.find((x) => x.id === cm[1]);
   if (cm && !c) return send(res, 404, { detail: 'No call with that id.' });
   if (c && !cm[2]) {
+    counts[c.id] = (counts[c.id] ?? 0) + 1;
     if (Number(q.get('wait_seconds')) > 0 && !c.finished) await sleep(2000); // a short stand-in for the long-poll
     const since = Number(q.get('since_line') ?? 0);
     live(c);
@@ -149,9 +175,9 @@ async function api(req, res, p, q) {
   }
   const ok = (message) => send(res, 200, { ok: true, message });
   switch (cm?.[2]) {
-    case 'hang-up': Object.assign(c, { finished: true, status: 'completed', phase: null, ended_at: iso(0), outcome: { result: 'not_done', summary: 'You hung up the call.', details: {} } }); c.owner.state = 'none'; return ok('Hung up.');
+    case 'hang-up': sockets.get(c.id)?.end('ended'); Object.assign(c, { finished: true, status: 'completed', phase: null, ended_at: iso(0), outcome: { result: 'not_done', summary: 'You hung up the call.', details: {} } }); c.owner.state = 'none'; return ok('Hung up.');
     case 'answer': { const b = await readBody(req); const qn = c.open_questions.find((x) => x.id === b.question_id); if (qn) { c.open_questions = c.open_questions.filter((x) => x !== qn); c.answered_questions.push({ ...qn, answer: b.answer }); c.transcript.push(line(c.transcript.length, 0, 'event', 'owner answered')); } return ok('Sent.'); }
-    case 'connect': c.owner = { ...c.owner, state: 'ringing', via: 'phone', alert_until: null }; c.transcript.push(line(c.transcript.length, 0, 'event', 'ringing owner')); return ok('Ringing.');
+    case 'connect': c.pending = false; c.owner = { ...c.owner, state: 'ringing', via: 'phone', alert_until: null }; // an open browser socket stays open c.transcript.push(line(c.transcript.length, 0, 'event', 'ringing owner')); return ok('Ringing.');
     case 'hand-back': c.owner = { ...c.owner, state: 'none', via: null }; c.phase = 'talking'; c.transcript.push(line(c.transcript.length, 0, 'event', 'owner handed the call back')); return ok('Handed back.');
     case 'audio-ticket': { const t = crypto.randomBytes(16).toString('hex'); tickets.add(`${c.id}:${t}`); return send(res, 200, { ticket: t, expires_in: 30 }); }
   }
@@ -165,26 +191,44 @@ function audioSocket(req, socket) {
   const accept = crypto.createHash('sha1').update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
   socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
   const frame = (op, data) => { const len = data.length; const head = len < 126 ? Buffer.from([0x80 | op, len]) : Buffer.from([0x80 | op, 126, len >> 8, len & 255]); socket.write(Buffer.concat([head, data])); };
-  const state = (owner) => { if (c) { c.owner = { ...c.owner, state: owner, via: 'app', alert_until: null }; c.phase = owner === 'on_call' ? 'owner_on_call' : 'talking'; c.transcript.push(line(c.transcript.length, 0, 'event', owner === 'on_call' ? 'owner took the call' : 'owner is listening')); } frame(1, Buffer.from(JSON.stringify({ type: 'state', owner, phase: c?.phase ?? null }))); };
+  const state = (owner) => { if (c) {
+    // Listening during a pending hand-over keeps alert_until: the fallback still fires then.
+    c.pending = owner === 'listening' && (c.owner.state === 'alerting' || c.pending);
+    c.owner = { ...c.owner, state: owner, via: 'app', alert_until: c.pending ? c.owner.alert_until : null }; c.phase = owner === 'on_call' ? 'owner_on_call' : 'talking'; c.transcript.push(line(c.transcript.length, 0, 'event', owner === 'on_call' ? 'owner took the call' : 'owner is listening')); } frame(1, Buffer.from(JSON.stringify({ type: 'state', owner, phase: c?.phase ?? null }))); };
   let authed = false; let t = 0; let timer; const mic = { n: 0, bytes: 0 };
+  const json = (m) => frame(1, Buffer.from(JSON.stringify(m)));
+  let gone = false; // closed on purpose (by the client or by us)
+  // Server messages: ended / replaced, then close.
+  const link = { end: (type) => { gone = true; json({ type }); clearInterval(timer); frame(8, Buffer.alloc(0)); socket.end(); },
+    error: (message) => json({ type: 'error', message }), drop: () => socket.destroy() };
   socket.on('data', (buf) => {
     for (let i = 0; i < buf.length;) { // parse client frames (always masked)
       const op = buf[i] & 15; let len = buf[i + 1] & 127; let o = i + 2;
       if (len === 126) { len = buf.readUInt16BE(o); o += 2; } else if (len === 127) { len = Number(buf.readBigUInt64BE(o)); o += 8; }
       const mask = buf.subarray(o, o + 4); const data = Buffer.from(buf.subarray(o + 4, o + 4 + len)).map((b, k) => b ^ mask[k % 4]); i = o + 4 + len;
-      if (op === 8) { clearInterval(timer); if (c) c.owner = { ...c.owner, state: 'none', via: null }; return socket.end(); }
+      if (op === 8) { gone = true; clearInterval(timer); if (c) c.owner = { ...c.owner, state: 'none', via: null }; return socket.end(); }
       if (op === 2) { mic.n++; mic.bytes = len; continue; } // microphone audio: counted, then dropped
       if (op !== 1) continue;
       const msg = JSON.parse(data.toString());
       if (!authed) {
         if (!c || !tickets.delete(`${id}:${msg.ticket}`)) return socket.end();
-        authed = true; state('listening');
+        authed = true;
+        sockets.get(id)?.end('replaced'); // one browser link per call: the older one is told and closed
+        sockets.set(id, link);
+        // A reconnect within the grace keeps the call; otherwise the owner starts as a listener.
+        if (c.owner.state === 'on_call' && c.owner.via === 'app') { clearTimeout(c.grace); json({ type: 'state', owner: 'on_call', phase: c.phase }); }
+        else state('listening');
         timer = setInterval(() => { const pcm = Buffer.alloc(640); for (let k = 0; k < 320; k++, t++) pcm.writeInt16LE(Math.round(Math.sin((2 * Math.PI * 440 * t) / 8000) * 6000 * (0.5 + 0.5 * Math.sin(t / 4000))), k * 2); frame(2, pcm); }, 40);
-      } else if (msg.type === 'join') state('on_call');
+      } else if (msg.type === 'join') { if (c.owner.state !== 'on_call') state('on_call'); } // join is a no-op when already on the call
       else if (msg.type === 'hand_back') state('listening');
     }
   });
-  socket.on('close', () => { clearInterval(timer); if (mic.n) console.log(`audio ${id}: ${mic.n} mic messages of ${mic.bytes} bytes`); });
+  socket.on('close', () => {
+    clearInterval(timer);
+    if (sockets.get(id) === link) sockets.delete(id);
+    // Dropped while on the call: the server waits 5 s (OWNER_DROP_GRACE_SECONDS), then hands back.
+    if (!gone && c?.owner.state === 'on_call' && c.owner.via === 'app') c.grace = setTimeout(() => { c.owner = { ...c.owner, state: 'none', via: null }; c.phase = 'talking'; }, 5000);
+    else if (!gone && c && sockets.get(id) == null && c.owner.via === 'app') c.owner = { ...c.owner, state: 'none', via: null }; if (mic.n) console.log(`audio ${id}: ${mic.n} mic messages of ${mic.bytes} bytes`); });
   socket.on('error', () => clearInterval(timer));
 }
 
@@ -192,6 +236,19 @@ const types = { '.js': 'text/javascript', '.html': 'text/html', '.json': 'applic
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   if (req.method === 'OPTIONS') return send(res, 204);
+  if (url.pathname === '/__mock/socket') {
+    const l = sockets.get(url.searchParams.get('id')); const what = url.searchParams.get('send');
+    if (!l) return send(res, 404, { detail: 'No open socket.' });
+    if (what === 'error') l.error('You do not have the call.'); else if (what === 'drop') l.drop(); else l.end('replaced');
+    return send(res, 200, { ok: true });
+  }
+  if (url.pathname === '/__mock/alert') {
+    const c = calls.find((x) => x.id === url.searchParams.get('id')); if (!c) return send(res, 404, {});
+    const on = url.searchParams.get('state') === 'alerting'; alertStart = Date.now(); alertLen = 1000 * Number(url.searchParams.get('seconds') ?? 20);
+    c.owner = { state: on ? 'alerting' : 'none', via: on ? 'app' : null, alert_until: null, unreachable: false };
+    return send(res, 200, { ok: true });
+  }
+  if (url.pathname === '/__mock/count') return send(res, 200, { count: counts[url.searchParams.get('id')] ?? 0 });
   if (url.pathname === '/__mock/calls') { const set = url.searchParams.get('set'); calls = set === 'empty' ? [] : sampleCalls(); return send(res, 200, { calls: calls.length }); }
   if (!url.pathname.startsWith('/callenvoy')) return send(res, 404, { detail: 'Not found' });
   const p = url.pathname.slice('/callenvoy'.length) || '/';

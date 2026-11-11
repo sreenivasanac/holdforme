@@ -44,3 +44,30 @@ export function makeChunker(size = MIC_SAMPLES) {
     return out;
   };
 }
+
+/** Streaming downsampler (e.g. 48 kHz -> 16 kHz): each output sample is the mean of the input
+ *  samples it covers, which also acts as a simple low-pass. Keeps the remainder between blocks. */
+export function makeDownsampler(fromHz: number, toHz = UP_HZ) {
+  const step = fromHz / toHz;
+  let rest = new Float32Array(0);
+  let pos = 0; // start of the next output window, in samples of `rest + block`
+  return (block: Float32Array): Float32Array => {
+    if (step === 1) return block;
+    const all = new Float32Array(rest.length + block.length);
+    all.set(rest);
+    all.set(block, rest.length);
+    const out: number[] = [];
+    while (pos + step <= all.length) {
+      const a = Math.floor(pos);
+      const b = Math.floor(pos + step);
+      let sum = 0;
+      for (let i = a; i < b; i++) sum += all[i];
+      out.push(b > a ? sum / (b - a) : all[a]);
+      pos += step;
+    }
+    const keep = Math.floor(pos);
+    rest = all.slice(keep);
+    pos -= keep;
+    return Float32Array.from(out);
+  };
+}

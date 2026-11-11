@@ -16,7 +16,7 @@ import {
 } from '../platform/alerts';
 import { checkMic, micPermission } from '../platform/audio';
 import { color, space } from '../theme';
-import { AudioMeter, Button, Card, Note, Pill, Sheet, Stack, StatusLine, Steps, SwitchRow, T, text } from './ui';
+import { AudioMeter, Button, Card, MicBlocked, Note, Pill, Sheet, Stack, StatusLine, Steps, SwitchRow, T, text } from './ui';
 
 const RING_TEST_MS = 3000;
 
@@ -205,10 +205,7 @@ export function AudioCheck() {
         </T>
         <AudioMeter level={level} label={label} />
         {state === 'denied' && (
-          <Note kind="blocked" title="Microphone blocked.">
-            <Text style={[text.base, { color: color.blockedInk }]}>You can listen to calls, but you cannot talk from this browser.</Text>
-            <Steps tone="blocked" items={['Click the lock icon next to the address.', 'Set Microphone to Allow.', 'Press Check microphone again.']} />
-          </Note>
+          <MicBlocked what="You can listen to calls, but you cannot talk from this browser." again="Press Check microphone again." />
         )}
         {state === 'error' && <Note kind="errsum">The microphone could not be opened. Check that one is connected.</Note>}
         <Button label={on ? 'Stop check' : 'Check microphone'} kind="secondary" pressed={on} onPress={() => void toggle()} />

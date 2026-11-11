@@ -1,14 +1,14 @@
 // The owner panel: listen, join, take over, hand back, hang up (plan section 10, 10a).
 // The panel follows the server: it changes only on the server's state message or the call's long-poll.
-import { type ReactNode, useEffect, useRef, useState } from 'react';
+import { type ReactNode, useContext, useEffect, useRef, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { api, type Call, type OwnerState } from '../api';
 import { phone } from '../format';
-import { useLatest, useNow } from '../hooks';
+import { LeaveGuardContext, useCalls, useLatest, useNow, useSettings } from '../hooks';
 import { guardLeave, micPermission, openAudio, watchMicPermission, type AudioLink } from '../platform/audio';
 import { color, countdownHeight, font, radius, space, useWide } from '../theme';
 import { secondsLeft } from './AlertBanner';
-import { AudioMeter, Button, Card, Note, Sheet, Steps, T, text } from './ui';
+import { AudioMeter, Button, Card, MicBlocked, Note, Sheet, T, text } from './ui';
 
 type Link = 'off' | 'connecting' | 'open' | 'failed';
 const RECONNECT_TRIES = 3; // the server waits 5 s (OWNER_DROP_GRACE_SECONDS) before it hands back
@@ -16,6 +16,9 @@ const RECONNECT_TRIES = 3; // the server waits 5 s (OWNER_DROP_GRACE_SECONDS) be
 export function OwnerControls({ call, callbackNumber }: { call: Call; callbackNumber: string | null }) {
   const wide = useWide();
   const now = useNow();
+  const { acknowledged, acknowledge } = useCalls();
+  const { settings } = useSettings();
+  const { setGuarded } = useContext(LeaveGuardContext);
   const [link, setLink] = useState<Link>('off');
   const [owner, setOwner] = useState<OwnerState>('none'); // state from our own socket
   const [callLevel, setCallLevel] = useState(0);
@@ -24,58 +27,94 @@ export function OwnerControls({ call, callbackNumber }: { call: Call; callbackNu
   const [muted, setMuted] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [moved, setMoved] = useState(false);
   const [askMic, setAskMic] = useState(false);
   const [confirmHangUp, setConfirmHangUp] = useState(false);
   const audio = useRef<AudioLink | null>(null);
+  const alive = useRef(true);
+  const retries = useRef(RECONNECT_TRIES);
   const ownerRef = useLatest(owner);
-  const alertMax = useRef(0);
+  const alertMax = useRef({ until: null as string | null, max: 0 });
 
-  useEffect(() => () => audio.current?.close(), []);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      audio.current?.close();
+      audio.current = null;
+    };
+  }, []);
   useEffect(() => {
     if (call.finished) audio.current?.close();
   }, [call.finished]);
   // Take over stays disabled while the microphone is blocked, until the browser allows it.
   useEffect(() => (micDenied ? watchMicPermission((p) => p !== 'denied' && setMicDenied(false)) : undefined), [micDenied]);
-  // Leaving the page while you have the call hands it back to the AI.
-  useEffect(() => guardLeave(link === 'open' && owner === 'on_call'), [link, owner]);
+  // Leaving the page while you have the call hands it back to the AI: ask first, in the app and in the browser.
+  const onCall = link === 'open' && owner === 'on_call';
+  useEffect(() => {
+    setGuarded(onCall);
+    const off = guardLeave(onCall);
+    return () => {
+      off();
+      setGuarded(false);
+    };
+  }, [onCall, setGuarded]);
 
   /** Opens the audio socket. `thenJoin` takes the call as soon as it is open. */
-  const connect = async (thenJoin: boolean, tries = RECONNECT_TRIES): Promise<void> => {
+  const connect = async (thenJoin: boolean): Promise<void> => {
     setLink('connecting');
     setError(null);
+    setMoved(false);
+    let ticket: string;
     try {
-      const { ticket } = await api.audioTicket(call.id);
-      const a = openAudio(call.id, ticket, {
-        onState: (o) => {
-          setLink('open');
-          setOwner(o);
-          setBusy(null);
-          if (o !== 'on_call') a.stopMic(); // the microphone is closed on hand-back
-        },
-        onEnded: () => setBusy(null),
-        onLevel: setCallLevel,
-        onMicLevel: setMicLevel,
-        onClose: (unexpected) => {
-          const wasOnCall = ownerRef.current === 'on_call';
-          audio.current = null;
-          setOwner('none');
-          setCallLevel(0);
-          if (unexpected && tries > 0) return void connect(wasOnCall, tries - 1); // reconnect with a new ticket
-          setLink(unexpected ? 'failed' : 'off');
-        },
-      });
-      audio.current = a;
-      if (thenJoin) await takeOver(a);
+      ({ ticket } = await api.audioTicket(call.id));
     } catch (e) {
+      if (!alive.current) return;
       setLink('failed');
       setBusy(null);
       setError((e as Error).message);
+      return;
     }
+    if (!alive.current) return; // the page closed while the ticket was on its way
+    const a: AudioLink = openAudio(call.id, ticket, {
+      onState: (o) => {
+        retries.current = RECONNECT_TRIES; // connected again: a later drop gets the full budget
+        setLink('open');
+        setOwner(o);
+        setBusy(null);
+      },
+      onEnded: () => setBusy(null),
+      onReplaced: () => setMoved(true),
+      onError: (m) => {
+        setError(m);
+        setBusy(null);
+      },
+      onLevel: setCallLevel,
+      onMicLevel: setMicLevel,
+      onClose: (unexpected) => {
+        if (audio.current !== a) return; // an older link
+        const wasOnCall = ownerRef.current === 'on_call';
+        audio.current = null;
+        if (!alive.current) return;
+        setOwner('none');
+        setCallLevel(0);
+        setBusy(null);
+        // Only a link that had the call reconnects (the server keeps it for 5 s); a listener just stops.
+        if (unexpected && wasOnCall && retries.current > 0) {
+          retries.current -= 1;
+          return void connect(true);
+        }
+        setLink(unexpected ? 'failed' : 'off');
+      },
+    });
+    audio.current = a;
+    if (thenJoin) await takeOver(a);
   };
 
   /** Opens the microphone (asking first if needed) and sends join. */
   const takeOver = async (a: AudioLink) => {
     const r = await a.startMic();
+    if (!alive.current || r === 'closed') return void (alive.current && setBusy(null));
     if (r === 'denied') {
       setMicDenied(true);
       setBusy(null);
@@ -122,9 +161,11 @@ export function OwnerControls({ call, callbackNumber }: { call: Call; callbackNu
     setBusy(null);
   };
 
+  /** Ring my phone / Join by phone instead. The browser link closes first, so the phone takes over cleanly. */
   const ringPhone = async () => {
     setBusy('phone');
     setError(null);
+    audio.current?.close();
     try {
       await api.connect(call.id, 'join', 'phone');
     } catch (e) {
@@ -151,7 +192,12 @@ export function OwnerControls({ call, callbackNumber }: { call: Call; callbackNu
     link === 'open' ? (owner === 'on_call' ? 'on_call' : 'listening') : byPhone ? 'phone' : server.state === 'alerting' || server.state === 'ringing' ? server.state : 'none';
 
   const left = secondsLeft(call, now);
-  if (state === 'alerting' && left != null) alertMax.current = Math.max(alertMax.current, left);
+  // The countdown bar is relative to the longest wait seen for this alert; a new alert starts over.
+  if (alertMax.current.until !== call.owner.alert_until) alertMax.current = { until: call.owner.alert_until, max: 0 };
+  // A hand-over is pending while alert_until is set: alerting, or listening here with the audio open.
+  // The server's fallback (phone ring or unreachable) still fires at alert_until, so the countdown stays.
+  const pending = (state === 'alerting' || state === 'listening') && left != null;
+  if (pending) alertMax.current.max = Math.max(alertMax.current.max, left);
   const transfer = call.mode === 'transfer' || !!call.connect_when;
   const phoneNext = transfer && call.reach !== 'app';
   const noPhone = !callbackNumber;
@@ -165,6 +211,21 @@ export function OwnerControls({ call, callbackNumber }: { call: Call; callbackNu
       </T>
     </View>
   );
+  const countdown = pending ? (
+    <View>
+      <View
+        style={s.countdown}
+        role="progressbar"
+        aria-label={phoneNext ? 'Time before your phone rings' : 'Time left to join'}
+        aria-valuemin={0}
+        aria-valuemax={alertMax.current.max || 1}
+        aria-valuenow={left}
+      >
+        <View style={[s.countdownFill, { width: `${Math.round((left / (alertMax.current.max || 1)) * 100)}%` }]} />
+      </View>
+      <Text style={[text.fine, s.countdownText]}>{phoneNext && !noPhone ? `Your phone rings in ${left} s` : `${left} s left`}</Text>
+    </View>
+  ) : null;
   const stack = (children: ReactNode) => <View style={[s.buttons, wide && s.buttonsWide]}>{children}</View>;
 
   let body: ReactNode;
@@ -202,11 +263,10 @@ export function OwnerControls({ call, callbackNumber }: { call: Call; callbackNu
           You are listening
         </T>
         <AudioMeter level={callLevel} label="Call audio" />
+        {countdown}
+        {server.state === 'ringing' && <Note kind="hint">Your phone is ringing. Answer it and press 1, or take over here.</Note>}
         {micDenied ? (
-          <Note kind="blocked" title="Microphone blocked.">
-            <Text style={[text.base, { color: color.blockedInk }]}>You can listen, but you cannot talk from this browser.</Text>
-            <Steps tone="blocked" items={['Click the lock icon next to the address.', 'Set Microphone to Allow.', 'Press Take over again.']} />
-          </Note>
+          <MicBlocked what="You can listen, but you cannot talk from this browser." again="Press Take over again." />
         ) : (
           <T v="muted">Nobody on the call hears you. The AI carries on.</T>
         )}
@@ -241,19 +301,12 @@ export function OwnerControls({ call, callbackNumber }: { call: Call; callbackNu
       </>
     );
   } else if (state === 'alerting') {
-    const max = alertMax.current || 1;
+    const ringingHere = !!settings?.alert_sound && !acknowledged.has(call.id);
     body = (
       <>
         <Text style={s.big}>A person is on the line</Text>
         <Text style={text.soft}>{transfer ? 'The AI is keeping them company until you join.' : 'The AI carries on with the call. Listen in, or join.'}</Text>
-        {left != null && (
-          <View>
-            <View style={s.countdown} role="progressbar" aria-label={phoneNext ? 'Time before your phone rings' : 'Time left to join'} aria-valuemin={0} aria-valuemax={max} aria-valuenow={left}>
-              <View style={[s.countdownFill, { width: `${Math.round((left / max) * 100)}%` }]} />
-            </View>
-            <Text style={[text.fine, s.countdownText]}>{phoneNext && !noPhone ? `Your phone rings in ${left} s` : `${left} s left`}</Text>
-          </View>
-        )}
+        {countdown}
         <Button label={connecting && busy === 'join' ? 'Connecting audio...' : 'Join now'} kind="go" size="big" busy={busy === 'join'} onPress={join} />
         {stack(
           <>
@@ -261,6 +314,7 @@ export function OwnerControls({ call, callbackNumber }: { call: Call; callbackNu
             <Button label="Ring my phone instead" kind="secondary" full={!wide} disabled={noPhone} busy={busy === 'phone'} onPress={ringPhone} />
           </>,
         )}
+        {ringingHere && <Button label="Stop ringing" kind="secondary" size="small" onPress={() => acknowledge(call.id)} />}
         <T v="fine">{noPhone ? 'Add a callback number in Settings to be rung by phone.' : `Headphones recommended. Your phone is ${phone(callbackNumber!)}.`}</T>
       </>
     );
@@ -290,6 +344,7 @@ export function OwnerControls({ call, callbackNumber }: { call: Call; callbackNu
           <Button label="Try again" kind="secondary" size="small" onPress={() => void connect(false)} />
         </Note>
       )}
+      {moved && link === 'off' && <Note kind="hint">The call moved to your phone or another tab.</Note>}
       {link !== 'failed' && error ? (
         <Text role="alert" style={text.err}>
           {error}

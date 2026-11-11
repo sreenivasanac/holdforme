@@ -74,13 +74,11 @@ export function T({
   v = 'body',
   style,
   id,
-  live,
 }: {
   children: ReactNode;
   v?: TVariant;
   style?: StyleProp<TextStyle>;
   id?: string;
-  live?: 'polite' | 'assertive';
 }) {
   const heading = v === 'h1' ? 1 : v === 'h2' ? 2 : v === 'h3' ? 3 : undefined;
   return (
@@ -89,7 +87,6 @@ export function T({
       style={[text[v], style]}
       role={heading ? 'heading' : v === 'err' ? 'alert' : undefined}
       aria-level={heading}
-      aria-live={live}
     >
       {children}
     </Text>
@@ -191,6 +188,16 @@ export function Steps({ items, tone = 'soft' }: { items: string[]; tone?: 'soft'
         </Text>
       ))}
     </View>
+  );
+}
+
+/** "Microphone blocked." with the steps to allow it; `again` is the last step. */
+export function MicBlocked({ what, again }: { what: string; again: string }) {
+  return (
+    <Note kind="blocked" title="Microphone blocked.">
+      <Text style={[text.base, { color: color.blockedInk }]}>{what}</Text>
+      <Steps tone="blocked" items={['Click the lock icon next to the address.', 'Set Microphone to Allow.', again]} />
+    </Note>
   );
 }
 
@@ -478,7 +485,6 @@ const btnText = StyleSheet.create({
 const pill = StyleSheet.create({
   neutral: { backgroundColor: color.secondary },
   ok: { backgroundColor: color.ok },
-  warn: { backgroundColor: color.warn },
   bad: { backgroundColor: color.bad },
   info: { backgroundColor: color.infoBg },
   alert: { backgroundColor: color.ok },
@@ -486,7 +492,6 @@ const pill = StyleSheet.create({
 const pillText = StyleSheet.create({
   neutral: { color: color.fg },
   ok: { color: color.okInk },
-  warn: { color: color.warnInk },
   bad: { color: color.fg },
   info: { color: color.infoInk },
   alert: { color: color.okInk },

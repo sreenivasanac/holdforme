@@ -1,7 +1,7 @@
 // Web alerts (plan section 10b): ring sound, browser notification, web push.
 // TODO: alerts.native.ts with expo-notifications (APNs / FCM) and a server sender.
 
-const BASE = process.env.EXPO_BASE_URL || '/callenvoy';
+import { WEB_BASE as BASE } from '../api';
 
 export type Permission = 'default' | 'granted' | 'denied' | 'unsupported';
 

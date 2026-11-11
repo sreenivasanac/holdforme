@@ -1,42 +1,24 @@
 import { router } from 'expo-router';
 import { useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import { api, ApiError, type CallerId, type Config, type Mode, type NewCall, type NoAnswer, type Reach, type Settings } from '../api';
+import { api, ApiError, type Config, type Mode, type NewCall, type Settings } from '../api';
 import { phone, toE164 } from '../format';
+import { useCallerId } from '../hooks';
 import { space, useWide } from '../theme';
-import { Button, Card, Cell, Note, Row, Segmented, Stack, SwitchRow, T, TextField, TextLink, text } from './ui';
+import { CallOptions, checkNumbers, MODE_OPTIONS, type Options } from './CallOptions';
+import { Button, Card, Note, Segmented, Stack, T, TextField, text } from './ui';
 import { VoicePicker } from './VoicePicker';
 
-export const MODE_OPTIONS = [
-  ['handle', 'AI handles the call'],
-  ['transfer', 'Transfer to me when a person answers'],
-] as const;
-export const REACH_OPTIONS = [
-  ['app', 'App'],
-  ['phone', 'Phone'],
-  ['app_then_phone', 'App, then phone'],
-] as const;
-export const CALLER_ID_OPTIONS = [
-  ['callenvoy', 'CallEnvoy number'],
-  ['own', 'My own number'],
-] as const;
-export const NO_ANSWER_OPTIONS = [
-  ['ai_handles', 'AI carries on'],
-  ['end_politely', 'End politely'],
-] as const;
-
-type Errors = Partial<Record<keyof NewCall | 'form', string>>;
-
-/** Integer in [min, max], or null. */
-export const intIn = (v: string, min: number, max: number) => {
-  const n = Number(v);
-  return v.trim() !== '' && Number.isInteger(n) && n >= min && n <= max ? n : null;
-};
+type Errors = Partial<Record<keyof NewCall | keyof Options | 'form', string>>;
 
 /** The place_call form. Every option starts from the saved settings. */
-export function CallForm({ config, settings, ownVerified }: { config: Config; settings: Settings; ownVerified: boolean }) {
+// The server's field names for the two options whose settings name differs.
+const TO_SETTING: Record<string, keyof Options> = { record: 'record_calls', from: 'caller_id' };
+
+export function CallForm({ config, settings }: { config: Config; settings: Settings }) {
   const wide = useWide();
-  const maxCall = config.limits.max_call_minutes;
+  const callerId = useCallerId();
+  const ownVerified = !!callerId?.verified && !!callerId.number && callerId.number === settings.callback_number;
   const [f, setF] = useState({
     to: '',
     business: '',
@@ -47,17 +29,20 @@ export function CallForm({ config, settings, ownVerified }: { config: Config; se
     on_behalf_of: '',
     connect_when: '',
     mode: settings.mode as Mode,
-    reach: settings.reach as Reach,
-    no_answer: settings.no_answer as NoAnswer,
+    voice: settings.voice,
+    reach: settings.reach,
+    no_answer: settings.no_answer,
+    caller_id: settings.caller_id,
     alert_on_human: settings.alert_on_human,
     listen_in: settings.listen_in,
-    record: settings.record_calls,
-    from: (settings.caller_id === 'own' && ownVerified ? 'own' : 'callenvoy') as CallerId,
+    record_calls: settings.record_calls,
     leave_voicemail: settings.leave_voicemail,
-    voice: settings.voice,
     alert_wait_seconds: String(settings.alert_wait_seconds),
+    phone_ring_seconds: String(settings.phone_ring_seconds),
     max_minutes: String(settings.max_minutes),
   });
+  // Own caller ID only once the number is verified (the state loads after the form opens).
+  const from = f.caller_id === 'own' && ownVerified ? 'own' : 'callenvoy';
   const [more, setMore] = useState(false);
   const [errors, setErrors] = useState<Errors>({});
   const [busy, setBusy] = useState(false);
@@ -66,19 +51,15 @@ export function CallForm({ config, settings, ownVerified }: { config: Config; se
   const needsPhone = f.reach === 'phone' && (f.mode === 'transfer' || !!f.connect_when.trim() || f.listen_in);
 
   const submit = async () => {
-    const e: Errors = {};
+    const { n, errors: e } = checkNumbers(f, config.ranges, ['alert_wait_seconds', 'max_minutes']) as { n: Record<string, number>; errors: Errors };
     const to = toE164(f.to);
     if (!to) e.to = 'Enter a US or Canada number with area code, like (503) 555-0142.';
     if (!f.business.trim()) e.business = 'Say who you are calling.';
     if (f.goal.trim().length < 5) e.goal = 'Say what the call should get done (at least 5 characters).';
-    const wait = intIn(f.alert_wait_seconds, 5, 120);
-    if (wait == null) e.alert_wait_seconds = 'Enter a number from 5 to 120.';
-    const max = intIn(f.max_minutes, 1, maxCall);
-    if (max == null) e.max_minutes = `Enter a number from 1 to ${maxCall}.`;
     if (needsPhone && !settings.callback_number) e.reach = 'Transfer by phone needs a callback number. Add one in Settings, or choose App.';
     setErrors(e);
     if (Object.keys(e).length) {
-      if (e.alert_wait_seconds || e.max_minutes || e.reach) setMore(true);
+      if (e.alert_wait_seconds || e.max_minutes || e.reach || e.caller_id) setMore(true);
       return;
     }
     const opt = (s: string) => s.trim() || undefined;
@@ -96,12 +77,12 @@ export function CallForm({ config, settings, ownVerified }: { config: Config; se
       no_answer: f.no_answer,
       alert_on_human: f.alert_on_human,
       listen_in: f.listen_in,
-      record: f.record,
-      from: f.from,
+      record: f.record_calls,
+      from,
       leave_voicemail: f.leave_voicemail,
       voice: f.voice,
-      alert_wait_seconds: wait!,
-      max_minutes: max!,
+      alert_wait_seconds: n.alert_wait_seconds,
+      max_minutes: n.max_minutes,
     };
     setBusy(true);
     try {
@@ -109,7 +90,8 @@ export function CallForm({ config, settings, ownVerified }: { config: Config; se
       router.replace(`/calls/${id}`);
     } catch (err) {
       setBusy(false);
-      const field = err instanceof ApiError && err.field && err.field in f ? (err.field as keyof NewCall) : 'form';
+      const name = err instanceof ApiError && err.field ? (TO_SETTING[err.field] ?? err.field) : '';
+      const field = name in f ? (name as keyof Errors) : 'form';
       setErrors({ [field]: err instanceof Error ? err.message : 'The call could not be placed.' });
       if (field !== 'form' && !['to', 'business', 'goal', 'facts', 'mode'].includes(field)) setMore(true);
     }
@@ -193,29 +175,15 @@ export function CallForm({ config, settings, ownVerified }: { config: Config; se
               maxLength={1500}
               error={errors.flexibility}
             />
-            <Row>
-              <Cell>
-                <TextField
-                  label="On behalf of"
-                  value={f.on_behalf_of}
-                  onChangeText={set('on_behalf_of')}
-                  placeholder={settings.name || 'Your name'}
-                  maxLength={80}
-                  help="From Settings when empty."
-                  error={errors.on_behalf_of}
-                />
-              </Cell>
-              <Cell>
-                <TextField
-                  label="Planned minutes"
-                  numeric
-                  value={f.max_minutes}
-                  onChangeText={set('max_minutes')}
-                  help={`Extended while on hold, never past ${maxCall}.`}
-                  error={errors.max_minutes}
-                />
-              </Cell>
-            </Row>
+            <TextField
+              label="On behalf of"
+              value={f.on_behalf_of}
+              onChangeText={set('on_behalf_of')}
+              placeholder={settings.name || 'Your name'}
+              maxLength={80}
+              help="From Settings when empty."
+              error={errors.on_behalf_of}
+            />
             <Text style={text.subhead}>Hand-over</Text>
             <TextField
               label="Also hand over when"
@@ -227,51 +195,14 @@ export function CallForm({ config, settings, ownVerified }: { config: Config; se
               help="Optional custom condition, in your words."
               error={errors.connect_when}
             />
-            <Segmented
-              label="How to reach me"
-              value={f.reach}
-              options={REACH_OPTIONS}
-              onChange={set('reach')}
-              help={reachHelp}
-              error={
-                errors.reach ? (
-                  <View style={s.inlineErr}>
-                    <Text role="alert" style={text.err}>
-                      {errors.reach}
-                    </Text>
-                    <TextLink label="Open Settings" onPress={() => router.push('/settings')} />
-                  </View>
-                ) : null
-              }
-            />
-            <Row>
-              <Cell>
-                <TextField
-                  label="Seconds to wait for you after an alert"
-                  numeric
-                  value={f.alert_wait_seconds}
-                  onChangeText={set('alert_wait_seconds')}
-                  error={errors.alert_wait_seconds}
-                />
-              </Cell>
-              <Cell>
-                <Segmented label="If I do not answer" value={f.no_answer} options={NO_ANSWER_OPTIONS} onChange={set('no_answer')} />
-              </Cell>
-            </Row>
-            <View>
-              <SwitchRow title="Alert me when a person answers" help="In AI-handles mode, so you can listen in." value={f.alert_on_human} onChange={set('alert_on_human')} />
-              <SwitchRow title="Listen from the start" help="Alert me as soon as the business picks up." value={f.listen_in} onChange={set('listen_in')} />
-              <SwitchRow title="Record this call" help="Some US states require all parties to agree to a recording." value={f.record} onChange={set('record')} />
-              <SwitchRow title="Leave a voicemail" help="If voicemail answers, the AI leaves one short message with your callback number." value={f.leave_voicemail} onChange={set('leave_voicemail')} />
-            </View>
-            <Segmented
-              label="Caller ID"
-              value={f.from}
-              options={CALLER_ID_OPTIONS}
-              onChange={set('from')}
-              disabled={ownVerified ? [] : ['own']}
-              help={ownVerified ? 'The number the business sees.' : 'To show your own number, verify your callback number in Settings first.'}
-              error={errors.from ? <Text role="alert" style={[text.err, s.inlineErr]}>{errors.from}</Text> : null}
+            <CallOptions
+              o={f}
+              onChange={(patch) => setF((x) => ({ ...x, ...patch }))}
+              errors={errors}
+              config={config}
+              ownVerified={ownVerified}
+              perCall
+              reachHelp={reachHelp}
             />
             <VoicePicker label="AI voice" voices={config.voices} value={f.voice} onChange={set('voice')} />
           </Stack>
@@ -287,7 +218,6 @@ export function CallForm({ config, settings, ownVerified }: { config: Config; se
 }
 
 const s = StyleSheet.create({
-  inlineErr: { marginTop: space.s, gap: space.xs },
   foot: { gap: space.l },
   footWide: { flexDirection: 'row', alignItems: 'center' },
 });

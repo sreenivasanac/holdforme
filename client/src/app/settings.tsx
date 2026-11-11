@@ -9,7 +9,7 @@ import { color, space } from '../theme';
 
 /** Settings: profile and call defaults (saved on the server), then this device's alerts and audio. */
 export default function SettingsScreen() {
-  const { config, settings, callerId, reloadCallerId, error, reload, save } = useSettings();
+  const { config, settings, error, reload } = useSettings();
   const signOut = useSignOut();
   if (!config || !settings)
     return (
@@ -18,16 +18,17 @@ export default function SettingsScreen() {
       </Screen>
     );
   const l = config.limits;
+  const [, maxCall] = config.ranges.max_minutes;
   return (
     <Screen>
-      <SettingsForm config={config} settings={settings} callerId={callerId} save={save} reloadCallerId={reloadCallerId} />
+      <SettingsForm config={config} settings={settings} />
       <DeviceAlerts config={config} />
       <AudioCheck />
       <Card label="Limits">
         <T v="h2">Limits</T>
         <View style={s.limits}>
           {[
-            `${settings.max_minutes} minutes planned per call, ${l.max_call_minutes} at most`,
+            `${settings.max_minutes} minutes planned per call, ${maxCall} at most`,
             `Up to ${l.max_concurrent_calls} calls at the same time`,
             `${l.daily_minute_cap} call minutes per day${l.minutes_used_today != null ? ` (${l.minutes_used_today} used today)` : ''}`,
             'US and Canada numbers only; premium and Caribbean area codes are blocked',

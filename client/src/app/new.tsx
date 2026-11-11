@@ -6,11 +6,11 @@ import { useSettings } from '../hooks';
 
 /** New call: the place_call form. */
 export default function NewCallScreen() {
-  const { config, settings, callerId, error, reload } = useSettings();
+  const { config, settings, error, reload } = useSettings();
   return (
     <Screen>
       <BackLink />
-      {config && settings ? <CallForm config={config} settings={settings} ownVerified={!!callerId?.verified} /> : <Loading error={error} retry={reload} label="Loading settings" />}
+      {config && settings ? <CallForm config={config} settings={settings} /> : <Loading error={error} retry={reload} label="Loading settings" />}
     </Screen>
   );
 }

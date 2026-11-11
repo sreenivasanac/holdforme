@@ -24,7 +24,6 @@ export const color = {
   errBg: '#2a1418',
   blockedInk: '#ffd0d0',
   okInk: '#04210f', // text on green
-  warnInk: '#2a1a00',
   okSoft: '#0f2a1b', // saved box, alert panel, owner line
   okLine: '#1f6d40',
   okText: '#b8f0cd',

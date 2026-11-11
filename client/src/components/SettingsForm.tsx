@@ -1,19 +1,17 @@
 // Settings: profile, caller ID, call defaults, alert channels, voice (plan sections 4a, 22).
 import { useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import { api, ApiError, type CallerId, type Config, type Mode, type NoAnswer, type ProfileField, type Reach, type Settings } from '../api';
+import { api, ApiError, type Config, type Mode, type ProfileField, type Settings } from '../api';
 import { phone, toE164 } from '../format';
-import type { CallerIdState } from '../hooks';
+import { useCallerId, useSettings } from '../hooks';
 import { font, space } from '../theme';
-import { CALLER_ID_OPTIONS, intIn, MODE_OPTIONS, NO_ANSWER_OPTIONS, REACH_OPTIONS } from './CallForm';
+import { CallOptions, checkNumbers, MODE_OPTIONS, type Options } from './CallOptions';
 import { Button, Card, Cell, Note, Pill, Row, Segmented, Stack, StatusLine, SwitchRow, T, TextField, text } from './ui';
 import { VoicePicker } from './VoicePicker';
 
-type Form = Omit<Settings, 'max_minutes' | 'alert_wait_seconds' | 'phone_ring_seconds'> & {
-  max_minutes: string;
-  alert_wait_seconds: string;
-  phone_ring_seconds: string;
-};
+type TextKey = ProfileField | 'name' | 'details';
+// The inputs hold strings: null (not set) shows as empty, and an empty field is saved as "" (cleared).
+type Form = Omit<Settings, keyof Options | TextKey | 'callback_number'> & Options & Record<TextKey | 'callback_number', string>;
 type Errors = Partial<Record<keyof Settings | 'form', string>>;
 
 const GROUPS: { title: string; fields: [ProfileField, string][] }[] = [
@@ -44,26 +42,20 @@ const GROUPS: { title: string; fields: [ProfileField, string][] }[] = [
   },
 ];
 
-export function SettingsForm({
-  config,
-  settings,
-  callerId,
-  save,
-  reloadCallerId,
-}: {
-  config: Config;
-  settings: Settings;
-  callerId: CallerIdState | null;
-  save: (patch: Partial<Settings>) => Promise<Settings>;
-  reloadCallerId: () => Promise<void>;
-}) {
-  const [f, setF] = useState<Form>(() => ({
-    ...settings,
-    callback_number: settings.callback_number ? phone(settings.callback_number) : '',
-    max_minutes: String(settings.max_minutes),
-    alert_wait_seconds: String(settings.alert_wait_seconds),
-    phone_ring_seconds: String(settings.phone_ring_seconds),
-  }));
+export function SettingsForm({ config, settings }: { config: Config; settings: Settings }) {
+  const { save, loadCallerId } = useSettings();
+  const callerId = useCallerId();
+  const [f, setF] = useState<Form>(() => {
+    const x = { ...settings } as Record<string, unknown>;
+    for (const k in x) if (x[k] === null) x[k] = '';
+    return {
+      ...(x as Form),
+      callback_number: settings.callback_number ? phone(settings.callback_number) : '',
+      max_minutes: String(settings.max_minutes),
+      alert_wait_seconds: String(settings.alert_wait_seconds),
+      phone_ring_seconds: String(settings.phone_ring_seconds),
+    };
+  });
   const [errors, setErrors] = useState<Errors>({});
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -72,40 +64,37 @@ export function SettingsForm({
     setSaved(false);
     setF((x) => ({ ...x, [k]: v }));
   };
-  const maxCall = config.limits.max_call_minutes;
   const verified = !!callerId?.verified && !!callerId.number && callerId.number === settings.callback_number;
 
   const submit = async () => {
-    const e: Errors = {};
     const cb = f.callback_number.trim() ? toE164(f.callback_number) : '';
-    if (cb == null) e.callback_number = 'Enter a US or Canada number with area code, like (503) 555-0142.';
-    const max = intIn(f.max_minutes, 1, maxCall);
-    if (max == null) e.max_minutes = `Enter a number from 1 to ${maxCall}.`;
-    const wait = intIn(f.alert_wait_seconds, 5, 120);
-    if (wait == null) e.alert_wait_seconds = 'Enter a number from 5 to 120.';
-    const ring = intIn(f.phone_ring_seconds, 10, 60);
-    if (ring == null) e.phone_ring_seconds = 'Enter a number from 10 to 60.';
-    if (f.caller_id === 'own' && (!verified || cb !== settings.callback_number)) e.caller_id = 'Verify your callback number first.';
-    setErrors(e);
+    const { n, errors: e } = checkNumbers(f, config.ranges, ['max_minutes', 'alert_wait_seconds', 'phone_ring_seconds']);
+    const all: Errors = e;
+    if (cb == null) all.callback_number = 'Enter a US or Canada number with area code, like (503) 555-0142.';
+    if (f.caller_id === 'own' && (!verified || cb !== settings.callback_number)) all.caller_id = 'Verify your callback number first.';
+    setErrors(all);
     setSaved(false);
-    if (Object.keys(e).length) return;
+    if (Object.keys(all).length) return;
     setBusy(true);
     try {
       // An empty string removes a text field (plan section 3, save_profile).
-      const next = await save({ ...f, callback_number: cb ?? '', max_minutes: max!, alert_wait_seconds: wait!, phone_ring_seconds: ring! });
+      const next = await save({ ...f, callback_number: cb ?? '', ...(n as Pick<Settings, 'max_minutes' | 'alert_wait_seconds' | 'phone_ring_seconds'>) });
       setF((x) => ({ ...x, callback_number: next.callback_number ? phone(next.callback_number) : '' }));
       setSaved(true);
-      if (next.callback_number !== settings.callback_number) void reloadCallerId().catch(() => {});
+      if (next.callback_number !== settings.callback_number) void loadCallerId().catch(() => {}); // a new number: ask again
     } catch (err) {
       const field = err instanceof ApiError && err.field && err.field in f ? (err.field as keyof Settings) : 'form';
       setErrors({ [field]: (err as Error).message });
+      // A field inside a closed group: open the group, so the error shows at the field.
+      const g = GROUPS.find((g) => g.fields.some(([k]) => k === field));
+      if (g) setOpen((o) => ({ ...o, [g.title]: true }));
     }
     setBusy(false);
   };
 
   const count = Object.keys(errors).filter((k) => k !== 'form').length;
-  const textField = (k: ProfileField | 'name' | 'details', label: string, extra?: object) => (
-    <TextField key={k} label={label} optional={k !== 'name'} value={f[k]} onChangeText={set(k)} error={errors[k]} {...extra} />
+  const textField = (k: TextKey, label: string, extra?: object) => (
+    <TextField key={k} label={label} optional={k !== 'name'} value={f[k]} onChangeText={set(k)} error={errors[k]} maxLength={config.text_limits[k]} {...extra} />
   );
 
   return (
@@ -118,7 +107,7 @@ export function SettingsForm({
           </View>
           <Text style={text.subhead}>About you</Text>
           <Row>
-            <Cell>{textField('name', 'Your name', { autoComplete: 'name', maxLength: 80 })}</Cell>
+            <Cell>{textField('name', 'Your name', { autoComplete: 'name' })}</Cell>
             <Cell>
               <TextField
                 label="Callback number"
@@ -131,7 +120,7 @@ export function SettingsForm({
               />
             </Cell>
           </Row>
-          <CallerIdStatus callerId={callerId} saved={settings.callback_number} reload={reloadCallerId} />
+          <CallerIdStatus saved={settings.callback_number} />
           <Row>
             <Cell>{textField('name_pronunciation', 'How to say your name', { help: 'For example: DAH-nuh RAY-ess' })}</Cell>
             <Cell>{textField('assistant_name', 'A first name for the AI', { help: 'Empty: the AI does not give itself a name.' })}</Cell>
@@ -143,7 +132,6 @@ export function SettingsForm({
           {textField('address', 'Address', { autoComplete: 'street-address' })}
           {textField('details', 'Anything else the AI may share', {
             rows: 4,
-            maxLength: 3000,
             help: 'Only what is written here, in the call request, or in your answers is shared. Leave out anything you would not say to a support agent.',
           })}
           {GROUPS.map((g) => (
@@ -167,56 +155,17 @@ export function SettingsForm({
             <T v="muted">Used for every new call. A call can change any of them.</T>
           </View>
           <Segmented label="When a person answers" value={f.mode} options={MODE_OPTIONS} onChange={(v) => set('mode')(v as Mode)} />
-          <Segmented
-            label="How to reach me"
-            value={f.reach}
-            options={REACH_OPTIONS}
-            onChange={(v) => set('reach')(v as Reach)}
-            help="App, then phone: an alert first; if you do not join in time, your phone rings."
+          <CallOptions
+            o={f}
+            onChange={(patch) => {
+              setSaved(false);
+              setF((x) => ({ ...x, ...patch }));
+            }}
+            errors={errors}
+            config={config}
+            ownVerified={verified}
+            reachHelp="App, then phone: an alert first; if you do not join in time, your phone rings."
           />
-          <Row>
-            <Cell>
-              <TextField label="Wait for me after an alert (seconds)" numeric value={f.alert_wait_seconds} onChangeText={set('alert_wait_seconds')} error={errors.alert_wait_seconds} />
-            </Cell>
-            <Cell>
-              <TextField label="Let my phone ring (seconds)" numeric value={f.phone_ring_seconds} onChangeText={set('phone_ring_seconds')} error={errors.phone_ring_seconds} />
-            </Cell>
-          </Row>
-          <Row>
-            <Cell>
-              <Segmented label="If I do not answer" value={f.no_answer} options={NO_ANSWER_OPTIONS} onChange={(v) => set('no_answer')(v as NoAnswer)} />
-            </Cell>
-            <Cell>
-              <TextField
-                label="Planned minutes per call"
-                numeric
-                value={f.max_minutes}
-                onChangeText={set('max_minutes')}
-                error={errors.max_minutes}
-                help={`Extended while on hold, never past ${maxCall}.`}
-              />
-            </Cell>
-          </Row>
-          <Segmented
-            label="Caller ID"
-            value={f.caller_id}
-            options={CALLER_ID_OPTIONS}
-            onChange={(v) => set('caller_id')(v as CallerId)}
-            disabled={verified ? [] : ['own']}
-            help={verified ? 'The number the business sees. With your own number, a business calls you back directly.' : 'To show your own number, verify your callback number above first.'}
-            error={errors.caller_id ? <Text role="alert" style={[text.err, s.err]}>{errors.caller_id}</Text> : null}
-          />
-          <View>
-            <SwitchRow title="Alert me when a person answers" help="When the AI handles the call, so you can listen in." value={f.alert_on_human} onChange={set('alert_on_human')} />
-            <SwitchRow title="Listen from the start" help="Alert me as soon as the business picks up." value={f.listen_in} onChange={set('listen_in')} />
-            <SwitchRow
-              title="Record calls"
-              help="Default for new calls. An agent can set this for a single call. Some US states require all parties to agree to a recording."
-              value={f.record_calls}
-              onChange={set('record_calls')}
-            />
-            <SwitchRow title="Leave a voicemail" help="If voicemail answers, the AI leaves one short message with your callback number." value={f.leave_voicemail} onChange={set('leave_voicemail')} />
-          </View>
           <Text style={text.subhead}>Alert me with</Text>
           <View>
             <SwitchRow title="Sound" help="A ring while the console is open." value={f.alert_sound} onChange={set('alert_sound')} />
@@ -249,16 +198,21 @@ export function SettingsForm({
 }
 
 /** Callback number state for caller ID, with Verify (plan section 22.2). */
-function CallerIdStatus({ callerId, saved, reload }: { callerId: CallerIdState | null; saved: string; reload: () => Promise<void> }) {
+function CallerIdStatus({ saved }: { saved: string | null }) {
+  const { callerId, loadCallerId } = useSettings();
   const [code, setCode] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const verified = !!callerId?.verified && callerId.number === saved;
+  const reload = () => loadCallerId().catch((e) => setError((e as Error).message));
   const verify = async () => {
     setBusy(true);
     setError(null);
     try {
-      setCode((await api.verifyCallerId()).validation_code);
+      const { validation_code } = await api.verifyCallerId();
+      setCode(validation_code);
+      // No code: the number is already verified with Twilio; reload the state so it shows Verified.
+      if (validation_code == null) await reload();
     } catch (e) {
       setError((e as Error).message);
     }
@@ -281,7 +235,7 @@ function CallerIdStatus({ callerId, saved, reload }: { callerId: CallerIdState |
           ) : null}
           <View style={s.inline}>
             <Button label={busy ? 'Starting...' : code ? 'Send a new code' : 'Verify'} kind="secondary" size="small" busy={busy} onPress={verify} />
-            {code ? <Button label="Check again" kind="secondary" size="small" onPress={() => void reload().catch((e) => setError((e as Error).message))} /> : null}
+            {code ? <Button label="Check again" kind="secondary" size="small" onPress={() => void reload()} /> : null}
           </View>
           {error ? (
             <Text role="alert" style={text.err}>

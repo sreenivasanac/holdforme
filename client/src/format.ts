@@ -33,7 +33,7 @@ export function clock(iso: string) {
   return time(new Date(iso));
 }
 
-export type Tone = 'neutral' | 'ok' | 'warn' | 'bad' | 'info' | 'alert';
+export type Tone = 'neutral' | 'ok' | 'bad' | 'info' | 'alert';
 
 /** Status badge text and colour (mockup wording). */
 export function statusLabel(c: Call): { text: string; tone: Tone; live: boolean } {

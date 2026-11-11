@@ -1,7 +1,7 @@
-import { router, usePathname } from 'expo-router';
+import { usePathname } from 'expo-router';
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, View, type PressableStateCallbackType } from 'react-native';
-import { useCalls, useSession } from '../hooks';
+import { useCalls, useGo, useSession } from '../hooks';
 import { border, color, font, radius, space, useWide } from '../theme';
 import { Button, Sheet, T, text } from './ui';
 
@@ -11,13 +11,14 @@ export function TopBar() {
   const path = usePathname();
   const signOut = useSignOut();
 
-  const nav = (href: '/' | '/settings', label: string) => {
+  const go = useGo();
+  const nav = (href: string, label: string) => {
     const on = href === '/' ? path === '/' || path.startsWith('/calls') || path === '/new' : path.startsWith(href);
     return (
       <Pressable
         role="link"
         aria-current={on ? 'page' : undefined}
-        onPress={() => router.push(href)}
+        onPress={() => go(href)}
         style={[s.link, wide && s.linkWide, on && s.on]}
       >
         {(st: PressableStateCallbackType & { hovered?: boolean }) => (
@@ -33,6 +34,7 @@ export function TopBar() {
       <View style={[s.nav, wide && s.navWide]} role="navigation" aria-label="Console">
         {nav('/', 'Calls')}
         {nav('/settings', 'Settings')}
+        {nav('/connect', 'Connect')}
         <Pressable role="button" onPress={signOut.request} style={[s.link, wide && s.linkWide]}>
           {(st: PressableStateCallbackType & { hovered?: boolean }) => (
             <Text style={[s.linkText, !wide && s.linkTextNarrow, st.hovered && s.linkTextOn]}>Sign out</Text>

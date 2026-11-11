@@ -1,10 +1,20 @@
 import { router, Slot } from 'expo-router';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
+import type { Call } from '../api';
 import { KeyGate } from '../components/KeyGate';
 import { TopBar } from '../components/TopBar';
-import type { Call } from '../api';
-import { CallsContext, SessionContext, useCallsState, useSessionState, useSettings } from '../hooks';
+import { Button, Sheet, T } from '../components/ui';
+import {
+  CallsContext,
+  LeaveGuardContext,
+  SessionContext,
+  SettingsContext,
+  useCallsState,
+  useLatest,
+  useSessionState,
+  useSettingsState,
+} from '../hooks';
 import { closeNotification, setupAlerts, showNotification, startRing } from '../platform/alerts';
 import { color } from '../theme';
 
@@ -19,27 +29,44 @@ export default function RootLayout() {
 
 function Console() {
   const calls = useCallsState(true);
-  const { settings } = useSettings();
-  useAlerts(calls.calls, calls.acknowledged, settings?.alert_sound ?? true, settings?.alert_notification ?? true, settings?.push_shows_business ?? true);
-  useEffect(() => setupAlerts((path) => router.push(path as '/')), []);
+  const settings = useSettingsState();
+  const [guarded, setGuarded] = useState(false);
+  const [leaveTo, setLeaveTo] = useState<string | null>(null);
+  const go = (href: string) => (guarded ? setLeaveTo(href) : router.push(href as '/'));
+  const goRef = useLatest(go);
+  const p = settings.settings;
+  useAlerts(calls.calls, calls.acknowledged, p?.alert_sound ?? true, p?.alert_notification ?? true, p?.push_shows_business ?? true);
+  useEffect(() => setupAlerts((path) => goRef.current(path)), [goRef]);
   return (
-    <CallsContext.Provider value={calls}>
-      <TopBar />
-      <View style={s.fill}>
-        <Slot />
-      </View>
-    </CallsContext.Provider>
+    <SettingsContext.Provider value={settings}>
+      <CallsContext.Provider value={calls}>
+        <LeaveGuardContext.Provider value={{ guarded, setGuarded, go }}>
+          <TopBar />
+          <View style={s.fill}>
+            <Slot />
+          </View>
+          <Sheet title="Leave this call?" visible={leaveTo != null} onClose={() => setLeaveTo(null)}>
+            <T v="soft">You have the call. If you leave this page, the call goes back to the AI.</T>
+            <Button
+              label="Leave"
+              kind="danger"
+              full
+              onPress={() => {
+                const to = leaveTo!;
+                setLeaveTo(null);
+                router.push(to as '/');
+              }}
+            />
+            <Button label="Stay on the call" kind="secondary" full onPress={() => setLeaveTo(null)} />
+          </Sheet>
+        </LeaveGuardContext.Provider>
+      </CallsContext.Provider>
+    </SettingsContext.Provider>
   );
 }
 
 /** Ring and notify while a call is alerting the owner (plan section 10b). */
-function useAlerts(
-  calls: Call[] | null,
-  acknowledged: Set<string>,
-  sound: boolean,
-  notify: boolean,
-  showBusiness: boolean,
-) {
+function useAlerts(calls: Call[] | null, acknowledged: Set<string>, sound: boolean, notify: boolean, showBusiness: boolean) {
   const notified = useRef(new Set<string>());
   const alerting = (calls ?? []).filter((c) => !c.finished && c.owner.state === 'alerting');
   const ringing = sound && alerting.some((c) => !acknowledged.has(c.id));

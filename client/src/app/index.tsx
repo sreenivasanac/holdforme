@@ -4,13 +4,12 @@ import { Loading } from '../components/Loading';
 import { CallList, EmptyCalls } from '../components/CallList';
 import { ConnectPanel } from '../components/ConnectPanel';
 import { Button, Card, Screen, T } from '../components/ui';
-import { useCalls, useSettings } from '../hooks';
+import { useCalls } from '../hooks';
 import { space } from '../theme';
 
 /** Calls (home): New call, the call list, and the MCP install steps. */
 export default function CallsScreen() {
   const { calls, error, refresh } = useCalls();
-  const { config } = useSettings();
   return (
     <Screen>
       <Card label="Calls">
@@ -28,7 +27,7 @@ export default function CallsScreen() {
           <CallList calls={calls} />
         )}
       </Card>
-      <ConnectPanel mcpUrl={config?.mcp_url} />
+      <ConnectPanel />
     </Screen>
   );
 }

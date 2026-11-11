@@ -1,7 +1,8 @@
-import { router } from 'expo-router';
+import { useGo } from '../hooks';
 import { TextLink } from './ui';
 
 /** "← All calls" */
 export function BackLink() {
-  return <TextLink label="← All calls" onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))} />;
+  const go = useGo();
+  return <TextLink label="← All calls" onPress={() => go('/')} />;
 }

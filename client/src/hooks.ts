@@ -6,6 +6,8 @@ import { clearKey, loadKey, saveKey } from './platform/keyStore';
 const LONG_POLL_SECONDS = 25;
 const LIST_POLL_MS = 3000;
 const RETRY_MS = 3000;
+const MIN_POLL_MS = 2000; // the shortest gap between two unchanged long-poll answers
+const LIST_LIMIT = 50;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const message = (e: unknown) => (e instanceof Error ? e.message : 'Something went wrong. Try again.');
@@ -61,10 +63,15 @@ export function useCallsState(enabled: boolean): CallsState {
     let timer: ReturnType<typeof setTimeout>;
     const load = async () => {
       try {
-        const list = await api.listCalls();
+        const list = await api.listCalls(LIST_LIMIT);
         if (!stop) {
           setCalls(list);
           setError(null);
+          // A dismissed alert that ended is forgotten, so the next alert on that call rings again.
+          setAck((ack) => {
+            const still = [...ack].filter((id) => list.some((c) => c.id === id && !c.finished && c.owner.state === 'alerting'));
+            return still.length === ack.size ? ack : new Set(still);
+          });
         }
       } catch (e) {
         if (!stop) setError(message(e));
@@ -88,6 +95,9 @@ export function useCallsState(enabled: boolean): CallsState {
 
 // ---- One call, followed with the same long-poll as agents ----
 
+/** What the long-poll compares to see whether anything changed (talk_seconds counts up by itself). */
+const signature = (c: Call) => JSON.stringify({ ...c, transcript: undefined, next_line: undefined, talk_seconds: undefined });
+
 export function useCall(id: string) {
   const [call, setCall] = useState<Call | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -96,10 +106,12 @@ export function useCall(id: string) {
     let lines: Line[] = [];
     let since = 0;
     let wait = 0; // first load returns at once
+    let last = '';
     setCall(null);
     void (async () => {
       while (!ac.signal.aborted) {
         try {
+          const started = Date.now();
           const c = await api.getCall(id, wait, since, ac.signal);
           const fresh = (c.transcript ?? []).filter((l) => l.n >= since);
           lines = lines.concat(fresh);
@@ -107,6 +119,11 @@ export function useCall(id: string) {
           setCall({ ...c, transcript: lines });
           setError(null);
           if (c.finished) return;
+          // The server may answer at once without a change (e.g. an inbound call it does not follow):
+          // wait a little so this does not become a tight loop.
+          const sig = signature(c);
+          if (wait && !fresh.length && sig === last && Date.now() - started < MIN_POLL_MS) await sleep(MIN_POLL_MS);
+          last = sig;
           wait = LONG_POLL_SECONDS;
         } catch (e) {
           if (ac.signal.aborted) return;
@@ -121,11 +138,38 @@ export function useCall(id: string) {
   return { call, error };
 }
 
-// ---- Settings and server config ----
+// ---- Settings and server config: loaded once for the whole console ----
 
 export type CallerIdState = { number: string | null; verified: boolean };
 
-export function useSettings() {
+export type SettingsState = {
+  config: Config | null;
+  settings: Settings | null;
+  error: string | null;
+  reload: () => void;
+  save: (patch: Partial<Settings>) => Promise<Settings>;
+  callerId: CallerIdState | null;
+  /** Asks the server (a live Twilio lookup), so only screens that show caller ID call it. */
+  loadCallerId: () => Promise<void>;
+};
+export const SettingsContext = createContext<SettingsState | null>(null);
+
+export function useSettings(): SettingsState {
+  const s = useContext(SettingsContext);
+  if (!s) throw new Error('useSettings outside the console');
+  return s;
+}
+
+/** The caller-ID state, loaded the first time a screen needs it. */
+export function useCallerId() {
+  const { callerId, loadCallerId } = useSettings();
+  useEffect(() => {
+    if (!callerId) void loadCallerId().catch(() => {});
+  }, [callerId, loadCallerId]);
+  return callerId;
+}
+
+export function useSettingsState(): SettingsState {
   const [config, setConfig] = useState<Config | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [callerId, setCallerId] = useState<CallerIdState | null>(null);
@@ -134,14 +178,11 @@ export function useSettings() {
   useEffect(() => {
     let stop = false;
     setError(null);
-    // A failing caller-ID check must not block the screen: treat it as not verified.
-    const cid = api.callerId().catch(() => ({ number: null, verified: false }));
-    Promise.all([api.config(), api.profile(), cid])
-      .then(([c, p, v]) => {
+    Promise.all([api.config(), api.profile()])
+      .then(([c, p]) => {
         if (stop) return;
         setConfig(c);
         setSettings(p);
-        setCallerId(v);
       })
       .catch((e) => !stop && setError(message(e)));
     return () => {
@@ -153,9 +194,24 @@ export function useSettings() {
     setSettings(next);
     return next;
   }, []);
-  const reloadCallerId = useCallback(() => api.callerId().then(setCallerId), []);
-  return { config, settings, callerId, reloadCallerId, error, reload: () => setTick((t) => t + 1), save };
+  const loadCallerId = useCallback(async () => {
+    try {
+      setCallerId(await api.callerId());
+    } catch (e) {
+      // A failing lookup must not block the screen: treat it as not verified.
+      setCallerId({ number: null, verified: false });
+      throw e;
+    }
+  }, []);
+  return { config, settings, error, reload: () => setTick((t) => t + 1), save, callerId, loadCallerId };
 }
+
+// ---- Leaving the call page while the owner has the call through the browser ----
+
+export type LeaveGuard = { guarded: boolean; setGuarded: (on: boolean) => void; go: (href: string) => void };
+export const LeaveGuardContext = createContext<LeaveGuard>({ guarded: false, setGuarded: () => {}, go: () => {} });
+/** Navigate inside the console; asks first while the owner has a call in this tab. */
+export const useGo = () => useContext(LeaveGuardContext).go;
 
 /** Re-renders every `ms` and returns the current time (timers, countdowns). */
 export function useNow(ms = 1000, active = true) {

@@ -1,6 +1,9 @@
 // Typed client for the CallEnvoy console API (plan sections 3, 4, 4a).
 
 export const API_BASE = process.env.EXPO_PUBLIC_API_BASE ?? '/callenvoy';
+/** Where the console's own static files (sw.js, mic-worklet.js, icon) are served: the export's base path.
+ *  Not API_BASE: in local dev the API is on another origin, and a service worker must be same-origin. */
+export const WEB_BASE = process.env.EXPO_BASE_URL || '/callenvoy';
 
 export type CallStatus = 'queued' | 'dialing' | 'in_progress' | 'completed' | 'no_answer' | 'busy' | 'failed' | 'canceled';
 export type Phase = 'menu' | 'on_hold' | 'talking' | 'connecting_owner' | 'owner_on_call' | null;
@@ -45,10 +48,11 @@ export type Call = {
   recordings?: { url: string; duration_seconds: number }[];
 };
 
+// Text settings are null when not set.
 export type Settings = {
-  name: string;
-  callback_number: string;
-  details: string;
+  name: string | null;
+  callback_number: string | null;
+  details: string | null;
   voice: string;
   record_calls: boolean;
   max_minutes: number;
@@ -65,29 +69,27 @@ export type Settings = {
   push_shows_business: boolean;
   caller_id: CallerId;
   leave_voicemail: boolean;
-} & Record<ProfileField, string>;
+} & Record<ProfileField, string | null>;
 
 export type CallerId = 'callenvoy' | 'own';
 
 /** Optional calling-profile text fields (plan section 22.4). */
-export const PROFILE_FIELDS = [
-  'name_pronunciation',
-  'assistant_name',
-  'email',
-  'address',
-  'date_of_birth',
-  'insurance_carrier',
-  'insurance_member_id',
-  'insurance_group_number',
-  'dental_insurance_carrier',
-  'dental_insurance_member_id',
-  'vehicle',
-  'vin',
-  'frequent_flyer_numbers',
-  'known_traveler_number',
-  'redress_number',
-] as const;
-export type ProfileField = (typeof PROFILE_FIELDS)[number];
+export type ProfileField =
+  | 'name_pronunciation'
+  | 'assistant_name'
+  | 'email'
+  | 'address'
+  | 'date_of_birth'
+  | 'insurance_carrier'
+  | 'insurance_member_id'
+  | 'insurance_group_number'
+  | 'dental_insurance_carrier'
+  | 'dental_insurance_member_id'
+  | 'vehicle'
+  | 'vin'
+  | 'frequent_flyer_numbers'
+  | 'known_traveler_number'
+  | 'redress_number';
 
 export type Voice = { name: string; gender: string; accent: string; style: string; sample_url: string; default?: boolean };
 
@@ -96,8 +98,8 @@ export type Config = {
   mcp_url: string;
   voices: Voice[];
   limits: { max_call_minutes: number; max_concurrent_calls: number; daily_minute_cap: number; minutes_used_today?: number };
-  defaults?: Partial<Settings>;
-  ranges?: Record<string, [number, number]>;
+  ranges: Record<'max_minutes' | 'alert_wait_seconds' | 'phone_ring_seconds', [number, number]>;
+  text_limits: Record<string, number>;
   vapid_public_key: string | null;
 };
 
@@ -162,17 +164,15 @@ async function request<T>(method: string, path: string, body?: unknown, signal?:
   return data as T;
 }
 
-// Accepts {detail: "msg", field}, {error: "msg"} and FastAPI's 422 list [{loc, msg}].
-function toError(status: number, data: any): ApiError {
-  const d = data?.detail ?? data?.error;
-  if (Array.isArray(d) && d[0]) return new ApiError(String(d[0].msg), status, d[0].loc?.[d[0].loc.length - 1]);
-  if (typeof d === 'string') return new ApiError(d, status, data?.field);
+// The server sends errors as {detail, field?}.
+function toError(status: number, data: { detail?: unknown; field?: string } | null): ApiError {
+  if (typeof data?.detail === 'string') return new ApiError(data.detail, status, data.field);
   return new ApiError(`The server answered with an error (${status}). Try again.`, status);
 }
 
 export const api = {
   config: () => request<Config>('GET', '/api/config'),
-  listCalls: (limit = 50) => request<Call[]>('GET', `/api/calls?limit=${limit}`),
+  listCalls: (limit: number) => request<Call[]>('GET', `/api/calls?limit=${limit}`),
   placeCall: (body: NewCall) => request<{ id: string }>('POST', '/api/calls', body),
   getCall: (id: string, waitSeconds: number, sinceLine: number, signal?: AbortSignal) =>
     request<Call>('GET', `/api/calls/${encodeURIComponent(id)}?wait_seconds=${waitSeconds}&since_line=${sinceLine}`, undefined, signal),
@@ -190,7 +190,6 @@ export const api = {
   removePushDevice: (endpoint: string) => request<unknown>('DELETE', '/api/push/subscriptions', { endpoint }),
   testPush: () => request<{ sent: number }>('POST', '/api/push/test'),
   callerId: () => request<{ number: string | null; verified: boolean }>('GET', '/api/caller-id'),
-  verifyCallerId: () => request<{ validation_code: string }>('POST', '/api/caller-id/verify'),
+  verifyCallerId: () => request<{ validation_code: string | null }>('POST', '/api/caller-id/verify'),
 };
 
-export const isLive = (c: Call) => !c.finished;
