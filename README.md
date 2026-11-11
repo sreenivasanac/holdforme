@@ -1,102 +1,100 @@
-# CallOrHold4Me
+# CallEnvoy
 
-**I make the call. I wait on hold. I get it done.** CallOrHold4Me is an AI agent that calls customer support for you. It gets through the phone menu and waits on hold. When a real person answers, it does one of two things:
+A private phone-call server for AI agents. An agent (Claude Code, Codex, Claude Desktop, Grok, or any MCP client) asks CallEnvoy to call a business. The AI presses the menu keys, waits on hold, and talks to the person. You can get an alert, listen in, take the call over, and hand it back.
 
-- **Call for me:** the agent handles the whole call. It explains your issue, answers the rep's questions, gets a reference number, and hangs up. You get a summary and a recording.
-- **Hold for me:** the agent alarms you and hands the human to you. The call transfers to your phone, or you listen live in the browser and type lines for the agent to say.
-
-Live demo: **https://pragnyalabs.com/hold4me**
-
-![CallOrHold4Me home page](docs/screenshots/home.png)
-
-## Try it (judges)
-
-Open https://pragnyalabs.com/hold4me and pick a tab in **Try it now**.
-
-| Tab | What happens | You need |
-| --- | --- | --- |
-| **1. Demo support line** (start here) | The agent calls our demo line "Northstar Internet". It is a real phone number with a phone menu, about 50 s of hold music and recorded messages, then a billing rep "Maria" (an AI voice that plays the human). | Nothing. About 2 minutes. |
-| **2. Call me (I play the company)** | The agent calls your phone. Read the script on the page: a menu, a hold message, then "Hi, this is Sam from billing". | A US/Canada phone |
-| **3. Call a real company** | Type "call Delta about my lost bag". Exa finds the number and phone-menu tips, and the agent calls. | Patience for real hold times |
-
-What to look for during a call:
-
-1. The agent presses **1** on the menu, then stays silent on hold.
-2. Every line the business says gets a label chip from **Jev**: hold music, recorded message, phone menu, or live human, with a score.
-3. When Maria answers, the **alarm** sounds, the banner turns green, and the tab title flashes.
-4. In **Call for me** mode (the default), the agent finishes the whole call: it gives the account name, gets the refund reference number, repeats it back, and hangs up. A summary and a recording follow.
-5. During the call you can press **Listen live** (audio streams to your browser), type a line under **Say it**, or **Hang up**.
-
-| Human detected | Call finished |
-| --- | --- |
-| ![Human detected](docs/screenshots/human-detected.png) | ![Call finished with summary](docs/screenshots/call-finished.png) |
+- Live at `https://pragnyalabs.com/callenvoy` (one owner, one API key).
+- Design and API follow [Call4me](https://github.com/skeptrunedev/call4me) (MIT) where that fits. Thank you to its author.
+- Earlier this repository held the hackathon project HoldForMe / CallOrHold4Me.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-  U["Browser"] -->|"POST /api/calls"| S["Next.js server"]
-  S -->|"lookup"| E["Exa"]
-  S -->|"outbound call"| V["Vapi + Deepgram"]
-  V -->|"Twilio number"| B["Support line"]
-  V -->|"transcript webhooks"| S
-  S -->|"classify each line"| J["Jev"]
-  S -->|"transfer / say / end"| V
-  U -->|"poll + listen WebSocket"| S
+  A["AI agent (MCP)"] --> S["CallEnvoy server"]
+  W["Console (web)"] --> S
+  S --- T["Twilio"] --- B["Business phone"]
+  S --- AI["Voice bot: Deepgram + GPT-4.1 + Fish Audio"]
+  S --- P["Your browser or phone"]
 ```
 
-- **Exa** finds the support number and phone-menu tips when you do not enter a number.
-- **Vapi** places the call from a **Twilio** number. **Deepgram** is the transcriber (Nova-3) and the voice (Aura-2). GPT-4.1 presses keys with the `dtmf` tool and stays silent on hold.
-- **Jev** (Typesafe) labels every line the business says. A human is confirmed after 2 `live_human` labels in a row, or 1 with a score of 0.85 or more. Keyword rules take over if Jev is not available.
-- When a human is confirmed, the server rings the alarm and does the handoff through Vapi's live call control: transfer to your phone, keep the rep engaged while you listen, or let the agent finish.
-- The demo line is a Twilio number whose Voice URL is `/api/demo-line` (TwiML: menu, hold music, recorded messages), which then dials a Vapi number answered by the "Maria" assistant.
+One Python process (FastAPI + [Pipecat](https://github.com/pipecat-ai/pipecat)) hosts the MCP endpoint, the Twilio webhooks and audio streams, one voice bot per call, the owner audio socket, web push, and the built console. Data is one SQLite file in `data/`.
 
-## Limits on the public demo
+## Connect an agent
 
-US and Canada numbers only (no 900/976 lines), 6 calls per hour per visitor, 4 calls at the same time, and 20 minutes per call. These live in `LIMITS` in `lib/config.ts`. Calls are recorded by Vapi so you can replay them.
-
-Measured cost of one demo call: about $0.18 for the CallOrHold4Me agent in Vapi, $0.08 for the AI rep, and about $0.05 in Twilio minutes (about $0.30 in total).
-
-## Run it yourself
+The console page **Connect** shows these lines with your key filled in.
 
 ```bash
-pnpm install
-cp .env.example .env.local   # fill in keys
-pnpm dev                     # http://localhost:3000
-pnpm test                    # classifier and guard checks
+claude mcp add --transport http callenvoy https://pragnyalabs.com/callenvoy/mcp --header "Authorization: Bearer <key>"
 ```
 
-Vapi webhooks need a public URL: set `PUBLIC_BASE_URL` (include the base path, if any).
+Clients that cannot send headers (Grok) use `https://pragnyalabs.com/callenvoy/mcp/<key>`. Prefer the header form: a key in a URL can end up in logs.
 
-### Demo support line
+Tools (prefix `callenvoy_`): `place_call`, `get_call`, `hang_up`, `list_calls`, `answer_question`, `connect_me`, `hand_back`, `get_recordings`, `get_profile`, `save_profile`, `list_voices`, `verify_number`.
 
-1. Import a Twilio number into Vapi and set `VAPI_PHONE_NUMBER_ID` (free Vapi numbers cannot dial out).
-2. Buy a second Twilio number. Set its Voice URL to `$PUBLIC_BASE_URL/api/demo-line` (HTTP POST) and put it in `DEMO_LINE_NUMBER`.
-3. Get a Vapi number for the rep. Put it in `DEMO_REP_NUMBER` and its id in `DEMO_REP_PHONE_NUMBER_ID`, then run:
+## Two call modes
+
+| Mode | The AI | You |
+|---|---|---|
+| `handle` (default) | Does the whole call | Can get an alert when a person answers, listen, take over, hand back |
+| `transfer` | Gets through the menu and the hold, then asks the person to wait | Get an alert in the console, then a phone ring, and join |
+
+You join in the browser (audio goes through the server; headphones recommended) or on your phone (key 1 takes over, `*` hands back).
+
+## Alerts
+
+Sound and browser notification while the console is open; web push when it is closed; then the phone ring. Turn them on in **Settings > Alerts on this device**. On an iPhone, web push works only after you add the console to the home screen (Share > Add to Home Screen).
+
+## Settings
+
+All settings have defaults, and you can change them in the console and with `callenvoy_save_profile`; most also per call. Main ones: `mode`, `reach` (`app`, `phone`, `app_then_phone`), `alert_wait_seconds`, `no_answer`, `alert_on_human`, `listen_in`, `voice`, `record_calls`, `max_minutes`, `caller_id` (`callenvoy` or your own verified number), `leave_voicemail`, and the calling profile (name, callback number, address, insurance, vehicle, travel numbers, free text). Safety limits are constants in `callenvoy/config.py` and cannot be changed through MCP.
+
+## Voices
+
+Ten Fish Audio voices; Hannah is the default. `callenvoy_list_voices` returns them with sample links.
+
+| Name | Gender | Accent |
+|---|---|---|
+| Hannah, Sarah, Laura | female | US |
+| Sophia | female | British |
+| Ethan, Adrian, Jordan | male | US |
+| Rohan, Vikram | male | Indian English |
+| Meera | female | Indian English |
+
+The three Indian English voices are community voices on Fish Audio; if one is removed, calls use the default voice.
+
+## Limits
+
+US and Canada numbers only; premium and non-US/Canada area codes are blocked. 30 minutes planned per call (extended on hold or in a live talk), 120 at most, 2 calls at one time, 240 minutes per day. Calls are recorded by default; some US states require all parties to agree to a recording, and that is the owner's duty.
+
+## Run locally
 
 ```bash
-node --env-file=.env.local scripts/setup-demo-rep.mjs
+cp .env.example .env.local   # fill in the values
+set -a; . ./.env.local; set +a
+pnpm --dir client install && pnpm --dir client run build
+uv run uvicorn callenvoy.main:app --host 127.0.0.1 --port 3020
 ```
 
-Hold music: a 16-second clip of Twilio's public "BusyStrings" hold music (`public/demo/hold-music.mp3`).
+Console development without the server: `pnpm --dir client run mock` (sample data, key `dev-key`) and `pnpm --dir client start`.
 
-## Code map
+Env names are in `.env.example`. Web push keys: `uv run python -m callenvoy.push --make-keys`. Voice samples (costs a few cents of Fish credit): `uv run python -m callenvoy.make_voice_samples`.
 
-| Path | Purpose |
-| --- | --- |
-| `lib/config.ts` | Branding, labels, thresholds, limits, demo-line script, env |
-| `lib/vapi.ts` | Agent prompt and Vapi assistant, call control |
-| `lib/classify.ts` | Jev classification with keyword fallback |
-| `lib/guard.ts` | Phone-number checks and per-IP rate limit |
-| `app/api/calls` | Start a call, read state, hang up, say a line |
-| `app/api/vapi/webhook` | Call state machine and human detection |
-| `app/api/demo-line` | TwiML for the demo support line |
-| `components/` | Try-it form, call panel, alarm and live listen audio |
+## Tests
 
-## TODO
+```bash
+uv run pytest                      # service checks, no network
+pnpm --dir client run typecheck
+pnpm --dir client test
+```
 
-- Talk from the browser after a human answers (today: listen live plus typed "Say it").
-- Deepgram Voice Agent for voice intake (browser SpeechRecognition today).
-- Your own number as caller ID.
-- Post-call follow-up, for example a dispute email draft.
-- Persistent call store (calls live in server memory today).
+## Deploy
+
+`deploy/deploy.sh` builds the console on your machine (Node 22.13+ and pnpm), copies the code and `client/dist` to the server, runs `uv sync`, restarts the `holdforme` systemd unit (`deploy/callenvoy.service`), and checks `/callenvoy/healthz`. The server needs `uv`, a filled `.env` (mode 600), and an nginx location `/callenvoy` that proxies to `127.0.0.1:3020` with WebSocket upgrade.
+
+## Cost (estimates)
+
+About $0.03-0.07 per call minute (Twilio, Deepgram, GPT-4.1, Fish Audio). Your phone leg adds about $0.02 per minute while it is connected. Listening in the browser adds no provider cost.
+
+## Not built yet
+
+A native mobile app (the console is an Expo project, so screens and logic are shared), native push, SMS alerts, an AI that answers callbacks (callbacks forward to your phone), scheduled calls, and a keypad in the console.
