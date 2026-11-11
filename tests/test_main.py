@@ -143,7 +143,40 @@ def test_demo_line_twiml_well_formed():
         doc = xml.dom.minidom.parseString(demo_line.twiml(step, retry))
         assert doc.documentElement.tagName == "Response"
     hold = demo_line.twiml("hold", False)
-    assert "wss://pragnyalabs.com/callenvoy/twilio/media/" in hold and 'value="demo_rep"' in hold
+    assert "wss://pragnyalabs.com/callenvoy/twilio/media/" in hold
+
+
+def test_demo_line_only_for_our_own_number(client):
+    """Fix 2: any other caller is hung up before a paid bot starts."""
+    assert signed(client, "/api/demo-line", {"From": "+14155550123"}).text.endswith("<Response><Hangup/></Response>")
+    assert "<Gather" in signed(client, "/api/demo-line", {"From": "+19186021019"}).text
+    assert "<Hangup/>" in signed(client, "/api/demo-line?step=hold", {"From": "+14155550123"}).text
+
+
+def test_startup_checks(monkeypatch):
+    """Fix 11: outside dev mode, missing settings are named (never their values)."""
+    monkeypatch.delenv("CALLENVOY_DEV")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "http://example.com/callenvoy")
+    with pytest.raises(SystemExit, match="PUBLIC_BASE_URL"):
+        main.startup_checks()
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://example.com/callenvoy")
+    with pytest.raises(SystemExit, match="DEEPGRAM_API_KEY, OPENAI_API_KEY, FISH_API_KEY"):
+        main.startup_checks()
+    monkeypatch.setenv("CALLENVOY_API_KEY", "s3cr3tvalue")
+    with pytest.raises(SystemExit, match="CALLENVOY_API_KEY") as e:
+        main.startup_checks()
+    assert "s3cr3tvalue" not in str(e.value)
+
+
+def test_logs_are_quiet():
+    """Fix 5: no Pipecat DEBUG lines (spoken sentences) and no httpx URLs (phone numbers)."""
+    import logging
+
+    from loguru import logger
+
+    main.quiet_logs()
+    assert logging.getLogger("httpx").getEffectiveLevel() == logging.WARNING
+    assert logger._core.min_level >= 30  # loguru WARNING
 
 
 def test_owner_phone_twiml(client):
@@ -177,6 +210,22 @@ def test_audio_socket_tickets(client):
         with pytest.raises(WebSocketDisconnect):
             ws.receive_text()
     with client.websocket_connect(f"/callenvoy/audio/{cid}") as ws:  # used ticket
+        ws.send_text(json.dumps({"ticket": ticket}))
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_text()
+    # Contract 7: a second link replaces the first, which is told {"type": "replaced"} before it is closed
+    t1 = client.post(f"/callenvoy/api/calls/{cid}/audio-ticket", headers=AUTH).json()["ticket"]
+    t2 = client.post(f"/callenvoy/api/calls/{cid}/audio-ticket", headers=AUTH).json()["ticket"]
+    with client.websocket_connect(f"/callenvoy/audio/{cid}") as first:
+        first.send_text(json.dumps({"ticket": t1}))
+        assert json.loads(first.receive_text())["type"] == "state"
+        with client.websocket_connect(f"/callenvoy/audio/{cid}") as second:
+            second.send_text(json.dumps({"ticket": t2}))
+            assert json.loads(second.receive_text())["owner"] == "listening"
+            assert json.loads(first.receive_text()) == {"type": "replaced"}
+            with pytest.raises(WebSocketDisconnect):
+                first.receive_text()
+    with client.websocket_connect(f"/callenvoy/audio/{cid}") as ws:  # used ticket again
         ws.send_text(json.dumps({"ticket": ticket}))
         with pytest.raises(WebSocketDisconnect):
             ws.receive_text()

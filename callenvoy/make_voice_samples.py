@@ -1,7 +1,7 @@
 """Makes one short mp3 per voice in config.VOICES under callenvoy/static/voices/ (costs a few cents of Fish credit).
 
 Run once: uv run python -m callenvoy.make_voice_samples [--force]
-Samples are made at phone quality (8 kHz) so a voice that sounds wrong on a phone line can be spotted.
+Samples use Fish's default mp3 rate: Fish refuses 8 kHz for mp3 (it accepts 32000 and 44100 only).
 """
 
 import sys
@@ -26,7 +26,7 @@ def main() -> None:
                 print(f"skip {out.name} (exists)")
                 continue
             r = c.post(FISH_TTS_URL, json={"text": config.VOICE_SAMPLE_TEXT, "reference_id": v["reference_id"],
-                                           "format": "mp3", "sample_rate": 8000})
+                                           "format": "mp3"})
             if r.status_code >= 400:
                 print(f"FAILED {v['name']}: HTTP {r.status_code} {r.text[:200]}")
                 continue

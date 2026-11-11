@@ -43,10 +43,13 @@ ConnectWhen = Annotated[str | None, Field(default=None, max_length=300, descript
 Reach = Annotated[Literal["app", "phone", "app_then_phone"] | None, Field(default=None, description='how the user is reached for a hand-over: "app" (console alert and push), "phone" (rings their callback number), "app_then_phone". Default: setting reach.')]
 AlertOnHuman = Annotated[bool | None, Field(default=None, description='in "handle" mode: alert the user when a live person answers, so they can listen in. Default: setting.')]
 ListenIn = Annotated[bool | None, Field(default=None, description="reach the user as soon as the business answers, to listen from the start. Default: setting.")]
-AlertWait = Annotated[int | None, Field(default=None, ge=5, le=120, description="seconds the AI waits for the user after an alert before the next step")]
+_wait = config.SETTINGS["alert_wait_seconds"]
+AlertWait = Annotated[int | None, Field(default=None, ge=_wait["min"], le=_wait["max"], description="seconds the AI waits for the user after an alert before the next step")]
 NoAnswer = Annotated[Literal["ai_handles", "end_politely"] | None, Field(default=None, description="what the AI does when the user cannot be reached")]
 MaxMinutes = Annotated[int | None, Field(default=None, ge=1, le=config.MAX_CALL_MINUTES, description=f"planned length in minutes (not a hard stop: on hold it waits {config.HOLD_EXTENSION_MINUTES} more minutes at a time, mid-talk {config.TALK_EXTENSION_MINUTES} more; never past {config.MAX_CALL_MINUTES})")]
 Voice = Annotated[VoiceName | None, Field(default=None, description=VOICE_HELP)]
+QuestionId = Annotated[str, Field(min_length=1, max_length=40)]
+AnswerText = Annotated[str, Field(min_length=1, max_length=1000, description='a few plain words, e.g. "Yes, 8:15 works."')]
 Record = Annotated[bool | None, Field(default=None, description="record this call. Default: setting record_calls.")]
 From = Annotated[Literal["callenvoy", "own"] | None, Field(default=None, alias="from", description='caller ID: "callenvoy" (the CallEnvoy number) or "own" (the user\'s callback number, once verified with callenvoy_verify_number; callbacks then ring the user directly). Default: setting caller_id.')]
 LeaveVoicemail = Annotated[bool | None, Field(default=None, description="on voicemail, leave one short message with the callback number (true) or hang up (false). Default: setting leave_voicemail.")]
@@ -218,15 +221,15 @@ async def place_call(inp: PlaceCallInput) -> dict:
     if s["reach"] == "phone" and (hand_over or s["listen_in"]) and not profile["callback_number"]:
         raise CallError("this call may ring the user's phone, but no callback number is saved: save callback_number "
                         "in the profile, or use reach \"app\" or \"app_then_phone\"", field="reach")
-    check_limits()
     from_number = None
-    if s["caller_id"] == "own":
+    if s["caller_id"] == "own":  # looked up before the limit check, so no await sits between check and insert
         own = profile["callback_number"]
         if not own or not await caller_id_verified(own):
             raise CallError("the user's own number is not a verified caller ID yet: save callback_number, then run "
                             "callenvoy_verify_number (or Settings > Verify) and type the code on that phone; or use "
                             'from "callenvoy"', field="from")
         from_number = own
+    check_limits()
 
     call_id = store.new_id("c_")
     text = lambda v: (v or "").strip() or None  # noqa: E731
@@ -253,8 +256,26 @@ async def place_call(inp: PlaceCallInput) -> dict:
         store.update_call(call_id, status="failed", error=f"could not dial: {e}", ended_at=store.now())
         _drop(call_id)
         raise CallError(f"could not dial: {e}", 502) from e
-    store.update_call(call_id, status="dialing", twilio_sid=sid)
+    store.update_call(call_id, twilio_sid=sid)
+    store.update_call(call_id, if_status="queued", status="dialing")  # a final status may have arrived first
+    spawn(call_id, _dial_timeout(call_id))
     return view(store.get_call(call_id))
+
+
+async def _dial_timeout(call_id: str) -> None:
+    """Closes a call that Twilio never answered and never finished (lost webhooks), so it frees its slot."""
+    await asyncio.sleep(config.DIAL_TIMEOUT_SECONDS)
+    row = store.get_call(call_id)
+    if not row or row["status"] not in ("queued", "dialing"):
+        return
+    store.update_call(call_id, status="failed", ended_at=store.now(), phase=None,
+                      error=f"no answer and no status from Twilio within {config.DIAL_TIMEOUT_SECONDS} s")
+    if row["twilio_sid"]:
+        try:
+            await twilio_api.update_call(row["twilio_sid"], hang_up=True)
+        except Exception as e:  # noqa: BLE001
+            log.warning("hang up of a stuck call failed for %s: %s", call_id, e)
+    await finish(call_id)
 
 
 # --- Read ---
@@ -406,12 +427,23 @@ async def caller_id_verified(number: str | None) -> bool:
         return False
 
 
+_caller_id_cache: dict[str, tuple[bool, float]] = {}  # number -> (verified, monotonic time of the lookup)
+
+
 async def caller_id() -> dict:
+    """For the console: Twilio's answer is cached for CALLER_ID_CACHE_SECONDS, cleared by a verify request."""
     number = get_profile()["callback_number"]
-    return {"number": number, "verified": await caller_id_verified(number)}
+    hit = _caller_id_cache.get(number or "")
+    if hit and time.monotonic() - hit[1] < config.CALLER_ID_CACHE_SECONDS:
+        return {"number": number, "verified": hit[0]}
+    verified = await caller_id_verified(number)
+    if number:
+        _caller_id_cache[number] = (verified, time.monotonic())
+    return {"number": number, "verified": verified}
 
 
 async def verify_number() -> dict:
+    _caller_id_cache.clear()
     number = get_profile()["callback_number"]
     if not number:
         raise CallError("save callback_number first; that is the number that gets verified", field="callback_number")
@@ -445,6 +477,7 @@ def inbound(form: dict) -> dict | None:
         "max_minutes": 0, "voice": config.DEFAULT_VOICE, "record": 0, "leave_voicemail": 0,
         "twilio_sid": form.get("CallSid"), "from_number": profile["callback_number"],
     })
+    LIVE[call_id] = Live()  # so get_call with wait_seconds waits until the forward ends
     return {"id": call_id, "caller": caller, "forward_to": profile["callback_number"]}
 
 
@@ -452,11 +485,12 @@ DIAL_STATUS = {"completed": "completed", "answered": "completed", "busy": "busy"
                "failed": "failed", "canceled": "canceled"}
 
 
-def inbound_done(call_id: str, form: dict) -> None:
+async def inbound_done(call_id: str, form: dict) -> None:
     row = store.get_call(call_id)
     if row and row["direction"] == "inbound" and not is_final(row):
         store.update_call(call_id, status=DIAL_STATUS.get(form.get("DialCallStatus", ""), "completed"),
                           talk_seconds=int(form.get("DialCallDuration") or 0), ended_at=store.now())
+        await finish(call_id)
 
 
 # --- Twilio events ---
@@ -545,19 +579,11 @@ def _drop(call_id: str) -> Live | None:
         for f in live.futures.values():
             if not f.done():
                 f.cancel()
-        current = asyncio.current_task() if _loop_running() else None
+        current = asyncio.current_task()
         for t in live.tasks:
             if t is not current:
                 t.cancel()
     return live
-
-
-def _loop_running() -> bool:
-    try:
-        asyncio.get_running_loop()
-        return True
-    except RuntimeError:
-        return False
 
 
 # --- Watchdog: max_minutes is a planned length, not a blind cut (Call4me time-limit.ts lesson) ---

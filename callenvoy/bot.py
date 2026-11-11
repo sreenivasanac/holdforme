@@ -4,6 +4,10 @@ Pipeline (plan section 7): transport.input -> Deepgram STT -> user aggregator ->
 -> Fish TTS -> OwnerGate -> transport.output -> AudioBufferProcessor (tap) -> assistant aggregator.
 Written against pipecat-ai 1.15.0 (PipelineTask / PipelineRunner are deprecated aliases there; the
 PipelineWorker / WorkerRunner names are used).
+
+While the owner has the call the AI must not act: LLMGate drops context frames going down (new user turns),
+OwnerGate drops context frames going up (function results from the assistant aggregator travel upstream),
+the bot's key tones, its late speech and interruptions; the tools that act on the line refuse.
 """
 
 import asyncio
@@ -12,6 +16,7 @@ import logging
 import re
 import time
 
+from openai import AsyncOpenAI
 from pipecat.adapters.llm.schemas.function_schema import FunctionSchema
 from pipecat.adapters.llm.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer
@@ -35,39 +40,59 @@ from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair, LLMUserAggregatorParams
 from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
-from pipecat.processors.filters.function_filter import FunctionFilter
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.serializers.twilio import TwilioFrameSerializer
+from pipecat.services.deepgram.stt import DeepgramSTTService
+from pipecat.services.fish.tts import FishAudioTTSService
+from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
 from pipecat.workers.runner import WorkerRunner
 
-from . import config
+from . import calls, config, owner, prompt, store, twilio_api
 
 log = logging.getLogger("callenvoy.bot")
 DIGITS = re.compile(r"^[0-9*#w]{1,20}$")
 NO_LLM = FunctionCallResultProperties(run_llm=False)
 
 
-class OwnerGate(FrameProcessor):
-    """Sits before transport.output. While the owner has the call (closed) it drops InterruptionFrame, so the other
-    side starting to talk does not cut the owner's audio, and drops any late TTS audio of the muted AI.
-    feed() pushes the owner's audio to the output. Also tracks whether the bot is speaking."""
+class LLMGate(FrameProcessor):
+    """Before the LLM: while closed, drops LLMContextFrame (in both directions), so the LLM does not run.
+    The other side's words still reach the transcript and the context."""
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.closed = False
-        self.bot_speaking = False
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
+        if not (self.closed and isinstance(frame, LLMContextFrame)):
+            await self.push_frame(frame, direction)
+
+
+class OwnerGate(LLMGate):
+    """Before transport.output. While closed it also drops the AI's late speech, its key tones and
+    InterruptionFrame (the other side starting to talk must not cut the owner's audio), and the upstream
+    LLMContextFrame of a function result. feed() and press() push the owner's audio and keys past the gate."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.bot_speaking = False
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
         if isinstance(frame, BotStartedSpeakingFrame):
             self.bot_speaking = True
         elif isinstance(frame, BotStoppedSpeakingFrame):
             self.bot_speaking = False
-        if self.closed and isinstance(frame, (InterruptionFrame, TTSAudioRawFrame)):
+        if self.closed and isinstance(frame, (InterruptionFrame, TTSAudioRawFrame, OutputDTMFFrame)):
+            await FrameProcessor.process_frame(self, frame, direction)
             return
-        await self.push_frame(frame, direction)
+        await super().process_frame(frame, direction)
 
     async def feed(self, pcm: bytes, sample_rate: int) -> None:
         await self.push_frame(OutputAudioRawFrame(audio=pcm, sample_rate=sample_rate, num_channels=1))
+
+    async def press(self, digits: str) -> None:
+        await self.push_frame(OutputDTMFFrame.from_string(digits))
 
     async def cut(self) -> None:
         """Cuts the bot's current speech: one InterruptionFrame both ways (stops LLM/TTS, empties the output queue)."""
@@ -108,21 +133,17 @@ TOOLS = {
         "they cannot be reached, do not call this again."),
     "end_call": _tool(
         "end_call", "Hang up, after the goodbye or after a voicemail.",
-        {"result": {"type": "string", "enum": ["done", "not_done", "voicemail", "no_human"]},
+        {"result": {"type": "string", "enum": list(config.OUTCOMES)},
          "summary": {"type": "string", "description": "one or two sentences: what happened"},
          "details": {"type": "object", "description": "facts to keep, e.g. {\"reference_number\": \"NS-1234\"}"}},
         ["result", "summary"]),
 }
+OWNER_HAS_CALL = "The person you call for has the call now. Do nothing and stay silent until you are told it is handed back."
 
 
-def turn_strategies():
-    """TURN_STOP: Pipecat's default (LocalSmartTurnAnalyzerV3) or a plain speech timeout if that is too slow."""
-    if config.TURN_STOP != "speech_timeout":
-        return None
-    from pipecat.turns.user_stop.speech_timeout_user_turn_stop_strategy import SpeechTimeoutUserTurnStopStrategy
-    from pipecat.turns.user_turn_strategies import UserTurnStrategies
-
-    return UserTurnStrategies(stop=[SpeechTimeoutUserTurnStopStrategy()])
+def save_outcome(call_id: str, result, summary, details=None) -> None:
+    store.update_call(call_id, outcome_result=result if result in config.OUTCOMES else "not_done",
+                      outcome_summary=str(summary or "")[:1000], outcome_details=json.dumps(details or {}))
 
 
 class CallBot:
@@ -130,16 +151,11 @@ class CallBot:
 
     def __init__(self, websocket, stream_sid: str, twilio_call_sid: str, system_prompt: str, voice_id: str,
                  call_id: str | None = None):
-        from pipecat.serializers.twilio import TwilioFrameSerializer
-        from pipecat.services.deepgram.stt import DeepgramSTTService
-        from pipecat.services.fish.tts import FishAudioTTSService
-        from pipecat.services.openai.llm import OpenAILLMService
-        from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
-
         self.call_id = call_id
         self.twilio_call_sid = twilio_call_sid
         self.owner_name = "the account holder"
-        self.ended = False
+        self.released = asyncio.Event()  # set while the AI has the call (not the owner)
+        self.released.set()
         self.owner_stt: PipelineWorker | None = None
         self.owner_runner: asyncio.Task | None = None
         serializer = TwilioFrameSerializer(
@@ -159,8 +175,8 @@ class CallBot:
         self.context = LLMContext(messages=[{"role": "system", "content": system_prompt}],
                                   tools=ToolsSchema(standard_tools=[TOOLS[n] for n in names]))
         self.aggs = LLMContextAggregatorPair(self.context, user_params=LLMUserAggregatorParams(
-            vad_analyzer=SileroVADAnalyzer(), user_turn_strategies=turn_strategies()))
-        self.llm_gate = FunctionFilter(self._llm_allowed)
+            vad_analyzer=SileroVADAnalyzer()))
+        self.llm_gate = LLMGate()
         self.gate = OwnerGate()
         self.tap = AudioBufferProcessor(sample_rate=config.CALL_SAMPLE_RATE, buffer_size=config.AUDIO_DOWN_BYTES)
         self.task = PipelineWorker(
@@ -172,9 +188,9 @@ class CallBot:
             enable_rtvi=False)
 
         for n in names:
-            self.llm.register_function(n, getattr(self, f"_tool_{n}"),
-                                       cancel_on_interruption=n != "ask_user",
-                                       timeout_secs=config.QUESTION_WAIT_SECONDS + 15 if n == "ask_user" else None)
+            # ask_user is async (the talk goes on) and has no Pipecat timeout: it waits QUESTION_WAIT_SECONDS for
+            # an answer, then for the hand-back if the owner has the call.
+            self.llm.register_function(n, getattr(self, f"_tool_{n}"), cancel_on_interruption=n != "ask_user")
 
         @self.aggs.user().event_handler("on_user_turn_stopped")
         async def _them(_agg, _strategy, message):
@@ -187,25 +203,40 @@ class CallBot:
         @self.tap.event_handler("on_track_audio_data")
         async def _tap(_proc, them, played, _rate, _channels):
             if self.call_id:
-                from . import owner
-
                 await owner.tap(self.call_id, them, played)
 
         @self.transport.event_handler("on_client_disconnected")
         async def _gone(_transport, _ws):
             await self.task.cancel()
 
+    @property
+    def owner_has_call(self) -> bool:
+        return not self.released.is_set()
+
     # --- run / stop ---
 
-    async def run(self, speak_first: bool = False) -> None:
+    async def run(self, speak_first: bool = False, max_seconds: float | None = None) -> None:
+        """Runs until the call ends. max_seconds is a hard limit (the demo rep has no call row or watchdog)."""
         if speak_first:  # the demo rep greets; the caller bot waits for the other side
             await self.task.queue_frame(LLMRunFrame())
+        limit = asyncio.create_task(self._limit(max_seconds)) if max_seconds else None
         try:
             await WorkerRunner(handle_sigint=False).run(self.task)
         finally:
+            if limit:
+                limit.cancel()
             await self._stop_owner_stt()
             if self.call_id:
                 await self._summary_if_missing()
+
+    async def _limit(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)
+        log.warning("call %s reached its hard limit of %s s", self.twilio_call_sid, seconds)
+        try:
+            await twilio_api.update_call(self.twilio_call_sid, hang_up=True)
+        except Exception as e:  # noqa: BLE001
+            log.warning("hang up at the hard limit failed: %s", e)
+        await self.stop()
 
     async def stop(self) -> None:
         await self.task.cancel()
@@ -213,7 +244,8 @@ class CallBot:
     # --- control from calls.py / owner.py ---
 
     async def tell(self, text: str, run_llm: bool) -> None:
-        """Appends a developer note to the AI's context (and runs the LLM when asked)."""
+        """Appends a developer note to the AI's context (and runs the LLM when asked; the gate blocks that run
+        while the owner has the call)."""
         await self.task.queue_frame(LLMMessagesAppendFrame(messages=[{"role": "developer", "content": text}],
                                                            run_llm=run_llm))
 
@@ -221,18 +253,19 @@ class CallBot:
         """Owner audio needs the tap; it runs only while an owner link is attached."""
         await (self.tap.start_recording() if on else self.tap.stop_recording())
 
+    def _close_gates(self, closed: bool) -> None:
+        self.llm_gate.closed = self.gate.closed = closed
+        (self.released.clear if closed else self.released.set)()
+
     async def take_over(self, rate: int, name: str) -> None:
         self.owner_name = name
-        self.llm_gate_closed = True
-        self.gate.closed = True
+        self._close_gates(True)
         await self.gate.cut()
-        await self.tell(f"{name} has joined the call. Stay completely silent until you are told the call is handed back.",
-                        run_llm=False)
+        await self.tell(prompt.joined_note(name), run_llm=False)
         await self._start_owner_stt(rate)
 
     async def hand_back(self, note: str) -> None:
-        self.llm_gate_closed = False
-        self.gate.closed = False
+        self._close_gates(False)
         await self._stop_owner_stt()
         await self.tell(note, run_llm=True)
 
@@ -246,23 +279,16 @@ class CallBot:
             await self.owner_stt.queue_frame(InputAudioRawFrame(audio=pcm, sample_rate=rate, num_channels=1))
 
     async def press(self, digit: str) -> None:
+        """The owner's own key press on the phone, passed to the business."""
         if DIGITS.match(digit) and digit != "w":
-            await self.gate.push_frame(OutputDTMFFrame.from_string(digit))
+            await self.gate.press(digit)
 
     # --- internals ---
-
-    llm_gate_closed = False
-
-    async def _llm_allowed(self, frame: Frame) -> bool:
-        """LLMGate: drops LLMContextFrame while the owner has the call, so the AI does not run."""
-        return not (self.llm_gate_closed and isinstance(frame, LLMContextFrame))
 
     async def _line(self, who: str, text: str | None) -> None:
         text = (text or "").strip()
         if not text or not self.call_id:
             return
-        from . import calls, owner, store
-
         store.add_line(self.call_id, who, text)
         calls.note_line(self.call_id, who)
         if who == "ai":
@@ -276,10 +302,6 @@ class CallBot:
 
     async def _start_owner_stt(self, rate: int) -> None:
         """A second tiny pipeline (Deepgram -> sink) for the owner's speech, while the owner has the call."""
-        from pipecat.services.deepgram.stt import DeepgramSTTService
-
-        from . import store
-
         async def on_text(text: str) -> None:
             store.add_line(self.call_id, "owner", text)
             await self.tell(f"{self.owner_name} said to them: {text}", run_llm=False)
@@ -303,37 +325,32 @@ class CallBot:
 
     async def _summary_if_missing(self) -> None:
         """The other side hung up before end_call: one short GPT request writes the outcome from the transcript."""
-        from . import store
-
         row = store.get_call(self.call_id)
         if not row or row["outcome_result"]:
             return
         text = "\n".join(f"{l['who']}: {l['text']}" for l in store.lines(self.call_id) if l["who"] != "event")
         if not text:
-            store.update_call(self.call_id, outcome_result="no_human", outcome_summary="Nobody spoke on the call.")
+            save_outcome(self.call_id, "no_human", "Nobody spoke on the call.")
             return
         try:
-            from openai import AsyncOpenAI
-
             r = await AsyncOpenAI(api_key=config.env("OPENAI_API_KEY")).chat.completions.create(
                 model=config.SUMMARY_MODEL, temperature=0, response_format={"type": "json_object"},
                 messages=[{"role": "system", "content":
-                           f"Phone call goal: {row['goal']}\nReturn JSON: {{\"result\": one of done, not_done, "
-                           "voicemail, no_human, \"summary\": one or two sentences, \"details\": object of facts like "
-                           "reference numbers}."}, {"role": "user", "content": text[-12000:]}])
+                           f"Phone call goal: {row['goal']}\nReturn JSON: {{\"result\": one of "
+                           f"{', '.join(config.OUTCOMES)}, \"summary\": one or two sentences, \"details\": object of "
+                           "facts like reference numbers}."}, {"role": "user", "content": text[-12000:]}])
             out = json.loads(r.choices[0].message.content or "{}")
-            result = out.get("result") if out.get("result") in ("done", "not_done", "voicemail", "no_human") else "not_done"
-            store.update_call(self.call_id, outcome_result=result, outcome_summary=str(out.get("summary", ""))[:1000],
-                              outcome_details=json.dumps(out.get("details") or {}))
+            save_outcome(self.call_id, out.get("result"), out.get("summary"), out.get("details"))
         except Exception as e:  # noqa: BLE001
             log.warning("summary failed for %s: %s", self.call_id, e)
-            store.update_call(self.call_id, outcome_result="not_done", outcome_summary="The other side hung up.")
+            save_outcome(self.call_id, "not_done", "The other side hung up.")
 
     # --- the bot's tools ---
 
     async def _tool_press_digits(self, params) -> None:
-        from . import calls, store
-
+        if self.owner_has_call:
+            await params.result_callback(OWNER_HAS_CALL, properties=NO_LLM)
+            return
         digits = str(params.arguments.get("digits", ""))
         if not DIGITS.match(digits):
             await params.result_callback("Use 1 to 20 of 0-9 * # (and w to pause).", properties=NO_LLM)
@@ -348,34 +365,32 @@ class CallBot:
         await params.result_callback("pressed", properties=NO_LLM)
 
     async def _tool_wait(self, params) -> None:
-        from . import calls, owner, store
-
         reason = params.arguments.get("reason")
         row = store.get_call(self.call_id)
         phase = {"menu": "menu", "hold": "on_hold"}.get(reason)
-        if phase and row and row["phase"] not in (phase, "owner_on_call"):
+        if phase and not self.owner_has_call and row and row["phase"] != phase:
             store.update_call(self.call_id, phase=phase)
             if phase == "on_hold":
                 calls.event(self.call_id, "waiting on hold")
-        if phase:
+        if phase and not self.owner_has_call:
             await owner.false_alarm(self.call_id)
         await params.result_callback("waiting", properties=NO_LLM)
 
     async def _tool_ask_user(self, params) -> None:
-        from . import calls
-
         question = str(params.arguments.get("question", "")).strip()[:500]
         if not question:
             await params.result_callback("Give the question.")
             return
         answer = await calls.ask(self.call_id, question)
+        await self.released.wait()  # an answer (or the timeout) during a take-over waits for the hand-back
         await params.result_callback(
             answer if answer is not None else
             "No answer yet. Say you do not have that detail right now and carry on. A later answer may still arrive.")
 
     async def _tool_connect_owner(self, params) -> None:
-        from . import calls, owner, prompt, store
-
+        if self.owner_has_call:
+            await params.result_callback(OWNER_HAS_CALL, properties=NO_LLM)
+            return
         live = calls.LIVE.get(self.call_id)
         row = store.get_call(self.call_id)
         name = prompt.owner_name(row, calls.get_profile())
@@ -384,7 +399,7 @@ class CallBot:
             await params.result_callback(f"{name} could not be reached a moment ago, so do not try again. "
                                          + prompt.no_answer_rule(row, name))
             return
-        if o.state == "on_call" or (o.handover and o.state in ("alerting", "ringing")):
+        if o.handover:
             await params.result_callback(f"{name} is already being brought on. Keep the person company.", properties=NO_LLM)
             return
         if not live or time.monotonic() - live.last_them > config.HANDOVER_RECENT_SECONDS:
@@ -401,13 +416,12 @@ class CallBot:
                                      f"{name} joined; do not start to solve the issue.", properties=NO_LLM)
 
     async def _tool_end_call(self, params) -> None:
-        from . import calls, store, twilio_api
-
+        if self.owner_has_call:
+            await params.result_callback(OWNER_HAS_CALL, properties=NO_LLM)
+            return
         args = params.arguments
         if self.call_id:
-            result = args.get("result") if args.get("result") in ("done", "not_done", "voicemail", "no_human") else "not_done"
-            store.update_call(self.call_id, outcome_result=result, outcome_summary=str(args.get("summary", ""))[:1000],
-                              outcome_details=json.dumps(args.get("details") or {}))
+            save_outcome(self.call_id, args.get("result"), args.get("summary"), args.get("details"))
             calls.event(self.call_id, "AI ended the call")
         await params.result_callback("ending", properties=NO_LLM)
         asyncio.create_task(self._hang_up_after_speech())
@@ -418,8 +432,8 @@ class CallBot:
         deadline = time.monotonic() + config.END_CALL_SPEECH_WAIT_SECONDS
         while self.gate.bot_speaking and time.monotonic() < deadline:
             await asyncio.sleep(0.2)
-        from . import calls, twilio_api
-
+        if self.owner_has_call:  # the owner took the call while the goodbye was playing
+            return
         try:
             if self.call_id:
                 await calls.hang_up(self.call_id)

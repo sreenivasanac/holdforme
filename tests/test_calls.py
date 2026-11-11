@@ -171,7 +171,81 @@ def test_inbound_row_and_business_name():
     row = store.get_call(fwd["id"])
     assert row["direction"] == "inbound" and row["business"] == "Dr. Chen's office" and not row["record"]
     assert calls.inbound({"From": "+16175550100"})["forward_to"] == "+14155550199"
-    calls.inbound_done(fwd["id"], {"DialCallStatus": "no-answer", "DialCallDuration": "0"})
+    run(calls.inbound_done(fwd["id"], {"DialCallStatus": "no-answer", "DialCallDuration": "0"}))
     assert store.get_call(fwd["id"])["status"] == "no_answer"
     view = calls.view(store.get_call(fwd["id"]))
     assert view["direction"] == "inbound" and view["finished"] and view["calling_number"] == "+14155550199"
+
+
+def test_late_dialing_does_not_overwrite_a_final_status(fresh, monkeypatch):
+    """Fix 3a: Twilio's final status can arrive before create_call returns."""
+    from callenvoy import twilio_api
+
+    real = twilio_api.create_call
+
+    async def fast_fail(**kw):
+        sid = await real(**kw)
+        cid = kw["url"].rsplit("/", 1)[1]
+        await calls.on_status(cid, {"CallStatus": "busy", "CallSid": sid})
+        return sid
+
+    monkeypatch.setattr(twilio_api, "create_call", fast_fail)
+    v = place()
+    assert v["status"] == "busy" and v["finished"]
+
+
+def test_stuck_dialing_call_is_closed(fresh, monkeypatch):
+    """Fix 3b: no answer and no final status within DIAL_TIMEOUT_SECONDS: failed, hung up, slot freed."""
+    monkeypatch.setattr(config, "DIAL_TIMEOUT_SECONDS", 0.05)
+
+    async def go():
+        v = await calls.place_call(calls.PlaceCallInput(**CALL))
+        await asyncio.sleep(0.2)
+        row = store.get_call(v["id"])
+        assert row["status"] == "failed" and "no status from Twilio" in row["error"]
+        assert (row["twilio_sid"], {"hang_up": True}) in fresh.updated
+        assert v["id"] not in calls.LIVE and not store.live_calls()
+        v2 = await calls.place_call(calls.PlaceCallInput(**CALL))
+        store.update_call(v2["id"], status="in_progress")  # answered: the timeout leaves it alone
+        await asyncio.sleep(0.2)
+        assert store.get_call(v2["id"])["status"] == "in_progress"
+    run(go())
+
+
+def test_inbound_get_call_waits_until_the_forward_ends():
+    """Contract 8: a forwarded call is live until the <Dial> action callback."""
+    store.save_profile({"callback_number": "+14155550199"})
+
+    async def go():
+        fwd = calls.inbound({"From": "+14155550123", "CallSid": "CAin"})
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        got = await calls.get_call(fwd["id"], wait_seconds=1)
+        assert loop.time() - t0 > 0.9 and not got["finished"]
+        loop.call_later(0.05, lambda: asyncio.ensure_future(
+            calls.inbound_done(fwd["id"], {"DialCallStatus": "completed", "DialCallDuration": "30"})))
+        t0 = loop.time()
+        got = await calls.get_call(fwd["id"], wait_seconds=5)
+        assert loop.time() - t0 < 2 and got["finished"] and got["talk_seconds"] == 30
+    run(go())
+
+
+def test_caller_id_cache(fresh, monkeypatch):
+    """Fix 14: Twilio is asked once per CALLER_ID_CACHE_SECONDS; a verify request clears the cache."""
+    store.save_profile({"callback_number": "+14155550199"})
+    asked = []
+    real = fresh.caller_id_verified
+
+    async def counting(number):
+        asked.append(number)
+        return await real(number)
+
+    from callenvoy import twilio_api
+
+    monkeypatch.setattr(twilio_api, "caller_id_verified", counting)
+    calls._caller_id_cache.clear()
+    assert run(calls.caller_id()) == {"number": "+14155550199", "verified": False}
+    fresh.verified.add("+14155550199")
+    assert run(calls.caller_id())["verified"] is False and len(asked) == 1  # cached
+    run(calls.verify_number())  # clears the cache (and sees it is verified now)
+    assert run(calls.caller_id())["verified"] is True

@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
+from pipecat.audio.utils import mix_audio
+
 from . import calls, config, guard, prompt, push, store, twilio_api
 
 log = logging.getLogger("callenvoy.owner")
@@ -25,7 +27,7 @@ class Link(Protocol):
 
     async def send_audio(self, pcm8k: bytes) -> None: ...
     async def send_state(self, owner_state: str, phase: str | None) -> None: ...
-    async def close(self, ended: bool = False) -> None: ...
+    async def close(self, reason: str | None = None) -> None: ...  # reason "ended" or "replaced" is told first
 
 
 @dataclass
@@ -49,6 +51,11 @@ OWNERS: dict[str, Owner] = {}
 
 
 def get(call_id: str) -> Owner:
+    """The owner state of a live call. After the call ended (end() ran) a throwaway is returned, never stored."""
+    if call_id in OWNERS:
+        return OWNERS[call_id]
+    if call_id not in calls.LIVE:
+        return Owner()
     return OWNERS.setdefault(call_id, Owner())
 
 
@@ -78,8 +85,11 @@ def _cancel(task: asyncio.Task | None) -> None:
         task.cancel()
 
 
-def _later(call_id: str, coro) -> asyncio.Task:
-    return calls.spawn(call_id, coro)
+def _timer(call_id: str, coro) -> None:
+    """Replaces the call's owner timer (the old one is cancelled)."""
+    o = get(call_id)
+    _cancel(o.timer)
+    o.timer = calls.spawn(call_id, coro)
 
 
 def push_state(call_id: str) -> None:
@@ -104,19 +114,37 @@ def _live(call_id: str) -> dict:
     return row
 
 
+def _idle_state(o: Owner) -> dict:
+    """The state to fall back to: still listening when the owner's audio is open."""
+    return {"state": "listening", "via": o.link.kind} if o.link else {"state": "none", "via": None}
+
+
 # --- Alerts and rings ---
 
-async def _alert(call_id: str, kind: str) -> None:
+async def _alert(call_id: str, kind: str, expire: bool = True) -> None:
+    """Alert to the console and push. With expire, the alert ends by itself after alert_wait_seconds."""
     row = store.get_call(call_id)
     until = datetime.now(timezone.utc) + timedelta(seconds=row["alert_wait_seconds"])
-    _set(call_id, state="alerting", via="app", alert_until=until.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    if not get(call_id).link:  # an owner who is already listening keeps that state; the alert still goes out
+        _set(call_id, state="alerting", via="app")
+    _set(call_id, alert_until=until.strftime("%Y-%m-%dT%H:%M:%SZ"))
     calls.event(call_id, "alert sent")
     asyncio.create_task(push.send_alert(row, kind))  # best effort; never blocks the call
+    if expire:
+        _timer(call_id, _expire_alert(call_id, row["alert_wait_seconds"]))
+
+
+async def _expire_alert(call_id: str, seconds: int) -> None:
+    await _sleep(seconds)
+    o = get(call_id)
+    if o.state == "alerting":
+        _set(call_id, state="none", via=None, alert_until=None)
+    elif o.alert_until:
+        _set(call_id, alert_until=None)
 
 
 async def _ring(call_id: str, mode: str, phone: str | None = None) -> bool:
     """Rings the owner's phone (a second Twilio call). False when there is no number to ring."""
-    row = store.get_call(call_id)
     profile = calls.get_profile()
     number = phone or profile["callback_number"]
     if not number:
@@ -136,8 +164,8 @@ async def _ring(call_id: str, mode: str, phone: str | None = None) -> bool:
     o.join_on_link = mode == "join"
     _set(call_id, state="ringing", via="phone", alert_until=None)
     calls.event(call_id, "ringing the owner's phone")
-    _cancel(o.timer)
-    o.timer = _later(call_id, _ring_timeout(call_id, profile["phone_ring_seconds"] + config.OWNER_GATHER_SECONDS))
+    wait = profile["phone_ring_seconds"] + config.OWNER_PROMPT_SECONDS + config.OWNER_GATHER_SECONDS
+    _timer(call_id, _ring_timeout(call_id, wait))
     return True
 
 
@@ -149,10 +177,11 @@ async def _ring_timeout(call_id: str, seconds: int) -> None:
 
 
 async def _not_reached(call_id: str) -> None:
-    """A ring or alert ended without the owner. A hand-over is settled: the AI is told and does not retry."""
+    """A ring or alert ended without the owner taking the call. A hand-over is settled: the AI is told and does
+    not retry. An owner whose audio is open stays listening."""
     o = get(call_id)
     if o.handover:
-        _set(call_id, state="none", via=None, alert_until=None, unreachable=True, handover=False, join_on_link=False)
+        _set(call_id, **_idle_state(o), alert_until=None, unreachable=True, handover=False, join_on_link=False)
         row = store.get_call(call_id)
         store.update_call(call_id, phase="talking")
         calls.event(call_id, "owner could not be reached")
@@ -160,7 +189,7 @@ async def _not_reached(call_id: str) -> None:
         if bot:
             await bot.tell(prompt.unreachable_note(_name(row), row), run_llm=True)
     elif o.state in ("alerting", "ringing"):
-        _set(call_id, state="none", via=None, alert_until=None, join_on_link=False)
+        _set(call_id, **_idle_state(o), alert_until=None, join_on_link=False)
 
 
 async def _hang_up_phone(call_id: str) -> None:
@@ -180,24 +209,24 @@ async def handover(call_id: str) -> None:
     row = store.get_call(call_id)
     o = get(call_id)
     o.handover = True
-    if o.link:  # already listening: take the call over right away
+    if o.link and o.link.kind == "phone":  # the owner listens on the phone: take the call over right away
         await join(call_id)
         return
     if row["reach"] == "phone":
         if not await _ring(call_id, "join"):
             await _not_reached(call_id)
         return
-    await _alert(call_id, "handover")
-    _cancel(o.timer)
-    o.timer = _later(call_id, _after_alert(call_id, row["alert_wait_seconds"], row["reach"] == "app_then_phone"))
+    await _alert(call_id, "handover", expire=False)
+    _timer(call_id, _after_alert(call_id, row["alert_wait_seconds"], row["reach"] == "app_then_phone"))
 
 
 async def _after_alert(call_id: str, seconds: int, then_phone: bool) -> None:
+    """The hand-over alert ran out. Also acts when the owner opened the audio but did not take the call."""
     await _sleep(seconds)
     o = get(call_id)
-    if o.state != "alerting":
+    if not o.handover or o.state not in ("alerting", "listening"):
         return
-    if o.handover and then_phone and await _ring(call_id, "join"):
+    if then_phone and await _ring(call_id, "join"):
         return
     await _not_reached(call_id)
 
@@ -209,40 +238,31 @@ async def on_human(call_id: str) -> None:
         return
     o.alerted_human = True
     await _alert(call_id, "human")
-    o.timer = _later(call_id, _expire_alert(call_id, store.get_call(call_id)["alert_wait_seconds"]))
-
-
-async def _expire_alert(call_id: str, seconds: int) -> None:
-    await _sleep(seconds)
-    if get(call_id).state == "alerting":
-        _set(call_id, state="none", via=None, alert_until=None)
 
 
 async def listen_in(call_id: str) -> None:
     """listen_in: reach the owner as soon as the business answers. The phone rings with reach phone."""
     row = store.get_call(call_id)
-    o = get(call_id)
     if row["reach"] == "phone" and await _ring(call_id, "listen"):
         return
-    o.alerted_human = True  # the listen-in alert covers the "person answered" alert
+    get(call_id).alerted_human = True  # the listen-in alert covers the "person answered" alert
     await _alert(call_id, "listen_in")
-    o.timer = _later(call_id, _expire_alert(call_id, row["alert_wait_seconds"]))
 
 
 async def connect(call_id: str, mode: str = "join", reach: str = "phone", phone: str | None = None) -> str:
-    """connect_me / the console's connect route: bring the owner to the call now."""
+    """connect_me / the console's connect route: bring the owner to the call now.
+    reach "phone" always rings the phone, also while a browser link is open (the phone link then replaces it)."""
     _live(call_id)
     o = get(call_id)
     if mode not in ("join", "listen") or reach not in ("phone", "app"):
         raise calls.CallError('mode must be "join" or "listen"; reach must be "phone" or "app"', field="mode")
     if o.state == "on_call":
         return "the owner already has the call"
-    if o.link and mode == "join":
-        await join(call_id)
-        return "the owner took the call over"
     if reach == "app":
+        if o.link and mode == "join":
+            await join(call_id)
+            return "the owner took the call over"
         await _alert(call_id, "handover" if mode == "join" else "listen_in")
-        o.timer = _later(call_id, _expire_alert(call_id, store.get_call(call_id)["alert_wait_seconds"]))
         return "alert sent to the console and the user's devices"
     if phone:
         try:
@@ -262,12 +282,12 @@ async def connect(call_id: str, mode: str = "join", reach: str = "phone", phone:
 async def false_alarm(call_id: str) -> None:
     """The bot judged hold or a menu while a hand-over alert or ring was out: cancel it."""
     o = OWNERS.get(call_id)
-    if not o or not o.handover or o.state not in ("alerting", "ringing"):
+    if not o or not o.handover or o.state not in ("alerting", "ringing", "listening"):
         return
     _cancel(o.timer)
     if o.state == "ringing":
         await _hang_up_phone(call_id)
-    _set(call_id, state="none", via=None, alert_until=None, handover=False, join_on_link=False)
+    _set(call_id, **_idle_state(o), alert_until=None, handover=False, join_on_link=False)
     calls.event(call_id, "false alarm, still on hold")
 
 
@@ -278,9 +298,10 @@ async def attach(call_id: str, link: Link) -> None:
     old, o.link = o.link, link
     o.last_sent = None
     _cancel(o.grace)
-    _cancel(o.timer)
+    if not o.handover:  # a pending hand-over keeps its fallback timer: listening is not taking the call
+        _cancel(o.timer)
     if old and old is not link:
-        await old.close()
+        await old.close("replaced")
     bot = _bot(call_id)
     if bot:
         await bot.set_tap(True)
@@ -293,7 +314,7 @@ async def attach(call_id: str, link: Link) -> None:
         _set(call_id, state="listening", via=link.kind, alert_until=None)
         await join(call_id)
     else:
-        _set(call_id, state="listening", via=link.kind, alert_until=None)
+        _set(call_id, state="listening", via=link.kind)
         calls.event(call_id, "owner is listening")
     push_state(call_id)
 
@@ -320,7 +341,7 @@ async def hand_back(call_id: str, lost: bool = False) -> str:
         raise calls.CallError("the owner does not have the call", 409)
     row = store.get_call(call_id)
     _add_owner_seconds(call_id, o)
-    _set(call_id, state="listening" if o.link else "none", via=o.via if o.link else None)
+    _set(call_id, **_idle_state(o))
     store.update_call(call_id, phase="talking")
     calls.event(call_id, "the connection to the owner was lost" if lost else "owner handed the call back")
     bot = _bot(call_id)
@@ -346,12 +367,14 @@ async def detach(call_id: str, link: Link) -> None:
         if link.kind == "phone":
             await hand_back(call_id)
         else:
-            o.grace = _later(call_id, _drop_grace(call_id))
+            _cancel(o.grace)
+            o.grace = calls.spawn(call_id, _drop_grace(call_id))
         return
     bot = _bot(call_id)
     if bot:
         await bot.set_tap(False)
-    _set(call_id, state="none", via=None)
+    if o.state == "listening":
+        _set(call_id, state="alerting" if o.handover else "none", via="app" if o.handover else None)
 
 
 async def _drop_grace(call_id: str) -> None:
@@ -381,11 +404,8 @@ async def mic(call_id: str, link: Link, pcm: bytes) -> bool:
 async def tap(call_id: str, them: bytes, played: bytes) -> None:
     """Call audio from the pipeline tap (8 kHz). Listening: both sides mixed. On the call: only the other side."""
     o = OWNERS.get(call_id)
-    if not o or not o.link:
-        return
-    from pipecat.audio.utils import mix_audio
-
-    await o.link.send_audio(them if o.state == "on_call" else mix_audio(them, played))
+    if o and o.link:
+        await o.link.send_audio(them if o.state == "on_call" else mix_audio(them, played))
 
 
 async def phone_key(call_id: str, link: Link, digit: str) -> None:
@@ -427,5 +447,5 @@ async def end(call_id: str) -> None:
                 store.update_call(call_id, outcome_result="handed_to_owner",
                                   outcome_summary="The call ended while the owner had it.")
         if o.link:
-            await o.link.close(ended=True)
+            await o.link.close("ended")
     await _hang_up_phone(call_id)

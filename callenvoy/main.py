@@ -6,6 +6,8 @@ live call state is in memory). Everything lives under BASE_PATH (/callenvoy), wh
 
 import contextlib
 import logging
+import os
+import sys
 from urllib.parse import urlparse
 from xml.sax.saxutils import escape, quoteattr
 
@@ -14,6 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from loguru import logger as loguru_logger
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BaseModel, Field
 
@@ -23,12 +26,27 @@ log = logging.getLogger("callenvoy")
 
 
 def startup_checks() -> None:
-    """Refuses to start without a strong API key, or without the web export (skippable with CALLENVOY_DEV=1)."""
+    """Refuses to start without a strong API key. Outside dev mode (CALLENVOY_DEV=1) it also needs an https
+    PUBLIC_BASE_URL, every provider key and the web export. Messages name the variable, never its value."""
     if len(guard.api_key()) < config.API_KEY_MIN_LENGTH:
         raise SystemExit(f"CALLENVOY_API_KEY is missing or shorter than {config.API_KEY_MIN_LENGTH} characters")
-    if not (config.WEB_DIR / "index.html").is_file() and not config.dev_mode():
+    if config.dev_mode():
+        return
+    if not config.env("PUBLIC_BASE_URL").startswith("https://"):
+        raise SystemExit("PUBLIC_BASE_URL is missing or not an https URL")
+    missing = [name for name in config.REQUIRED_ENV if not config.env(name)]
+    if missing:
+        raise SystemExit(f"missing environment variables: {', '.join(missing)}")
+    if not (config.WEB_DIR / "index.html").is_file():
         raise SystemExit(f"{config.WEB_DIR}/index.html is missing. Build the console first: {config.WEB_BUILD_COMMAND} "
                          "(or set CALLENVOY_DEV=1 for a local run without it)")
+
+
+def quiet_logs() -> None:
+    """Pipecat logs every spoken sentence at DEBUG and httpx logs URLs with phone numbers at INFO (plan 22.4)."""
+    loguru_logger.remove()
+    loguru_logger.add(sys.stderr, level="WARNING")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 # --- MCP (stateless, plain JSON). transport_security is required: the SDK otherwise only accepts Host: localhost. ---
@@ -43,6 +61,8 @@ _mcp_app = mcp_server.server.streamable_http_app(
 
 @contextlib.asynccontextmanager
 async def lifespan(_app):
+    os.umask(0o077)  # the database and its -wal / -shm files are readable by this user only
+    quiet_logs()
     startup_checks()
     store.open_db()
     await calls.restart_cleanup()
@@ -151,8 +171,8 @@ async def hang_up(call_id: str):
 
 
 class Answer(BaseModel):
-    question_id: str = Field(min_length=1, max_length=40)
-    answer: str = Field(min_length=1, max_length=1000)
+    question_id: calls.QuestionId
+    answer: calls.AnswerText
 
 
 @api.post("/api/calls/{call_id}/answer")
@@ -274,7 +294,7 @@ async def recording(token: str):
 # --- Twilio webhooks (signature checked) ---
 
 def xml(body: str) -> Response:
-    return Response(f'<?xml version="1.0" encoding="UTF-8"?><Response>{body}</Response>', media_type="text/xml")
+    return Response(twilio_api.twiml(body), media_type="text/xml")
 
 
 async def twilio_form(request: Request) -> dict | None:
@@ -319,7 +339,8 @@ async def twilio_owner(call_id: str, request: Request):
     if not row or row["status"] != "in_progress" or not o:
         return xml("<Hangup/>")
     if form.get("Digits") == "1":
-        return xml(demo_line.stream(f"/twilio/owner-media/{owner_audio.issue_phone_token(call_id)}"))
+        ticket = guard.issue_ticket(f"owner:{call_id}")
+        return xml(demo_line.stream(f"/twilio/owner-media/{call_id}/{ticket}"))
     if "Digits" in form:
         return xml("<Hangup/>")
     action = quoteattr(config.public_base_url() + f"/twilio/owner/{call_id}")
@@ -333,12 +354,12 @@ def inbound_twiml(fwd: dict | None, caller_id: str | None = None) -> str:
     """Section 22.1: forward a callback to the owner's phone, showing who calls. No number: refuse politely.
     TODO: the AI answers a callback and continues the earlier task (Call4me does this)."""
     if not fwd:
-        return demo_line.inbound_twiml()
+        return demo_line.refuse_twiml()
     retry = "" if caller_id is None else "?retry=1"
     action = quoteattr(config.public_base_url() + f"/twilio/inbound-done/{fwd['id']}{retry}")
-    return (f'<?xml version="1.0" encoding="UTF-8"?><Response><Dial callerId={quoteattr(caller_id or fwd["caller"])} '
-            f'timeout="{config.INBOUND_RING_SECONDS}" action={action} method="POST">'
-            f"<Number>{escape(fwd['forward_to'])}</Number></Dial></Response>")
+    return twilio_api.twiml(f'<Dial callerId={quoteattr(caller_id or fwd["caller"])} '
+                            f'timeout="{config.INBOUND_RING_SECONDS}" action={action} method="POST">'
+                            f"<Number>{escape(fwd['forward_to'])}</Number></Dial>")
 
 
 @api.post("/twilio/inbound")
@@ -361,14 +382,19 @@ async def twilio_inbound_done(call_id: str, request: Request, retry: str | None 
     if form.get("DialCallStatus") == "failed" and not retry and own and row and row["direction"] == "inbound":
         return Response(inbound_twiml({"id": call_id, "caller": row["to_number"], "forward_to": row["from_number"]},
                                       caller_id=own), media_type="text/xml")
-    calls.inbound_done(call_id, form)
+    await calls.inbound_done(call_id, form)
     return xml("")
 
 
 @api.post("/api/demo-line")
 async def demo(request: Request, step: str | None = None, try_: str | None = Query(None, alias="try")):
-    if await twilio_form(request) is None:
+    """Only our own outbound number may reach the demo rep: anyone else would start a paid bot."""
+    form = await twilio_form(request)
+    if form is None:
         return FORBIDDEN
+    own = config.env("TWILIO_FROM_NUMBER")
+    if not own or form.get("From") != own:
+        return xml("<Hangup/>")
     return Response(demo_line.twiml(step, try_ == "1"), media_type="text/xml")
 
 
@@ -395,7 +421,7 @@ async def twilio_media(ws: WebSocket, token: str):
         return
     if demo_rep:
         rep = bot.CallBot(ws, data["stream_id"], data["call_id"], demo_line.rep_prompt(), config.DEMO_REP_VOICE_ID)
-        await rep.run(speak_first=True)
+        await rep.run(speak_first=True, max_seconds=config.DEMO_REP_MAX_SECONDS)
         return
     call_id = row["id"]
     the_bot = bot.CallBot(ws, data["stream_id"], data["call_id"], prompt.build_prompt(row, calls.get_profile()),
@@ -407,9 +433,9 @@ async def twilio_media(ws: WebSocket, token: str):
         await calls.bot_finished(call_id)
 
 
-@api.websocket("/twilio/owner-media/{token}")
-async def twilio_owner_media(ws: WebSocket, token: str):
-    await owner_audio.phone_socket(ws, token)
+@api.websocket("/twilio/owner-media/{call_id}/{token}")
+async def twilio_owner_media(ws: WebSocket, call_id: str, token: str):
+    await owner_audio.phone_socket(ws, call_id, token)
 
 
 @api.websocket("/audio/{call_id}")
@@ -435,8 +461,6 @@ async def web(path: str):
     target = (root / path).resolve()
     if path and target.is_file() and target.is_relative_to(root):
         cache = "public, max-age=31536000, immutable" if path.startswith("_expo/") else "no-cache"
-        if path in ("sw.js", "index.html"):
-            cache = "no-cache"
         return FileResponse(target, headers={"Cache-Control": cache})
     index = root / "index.html"
     if not index.is_file():

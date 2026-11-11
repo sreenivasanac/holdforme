@@ -104,9 +104,9 @@ def build_prompt(call: dict, profile: dict) -> str:
         # Facts and questions (Call4me "Only say what you know")
         "Share only what is in the facts below and in answers you get. Never invent account data, dates of birth, "
         "addresses or numbers. Never read out a card number, bank details, a password or a Social Security number.",
-        f"If you need a detail you do not have, or they offer something outside what you may accept, call ask_user with "
-        f"a short self-contained question. First say one short line such as \"one moment, let me check that\", and keep "
-        f"helping with anything else meanwhile. If no answer comes, say you do not have that detail right now and carry on.",
+        "If you need a detail you do not have, or they offer something outside what you may accept, call ask_user with "
+        "a short self-contained question. First say one short line such as \"one moment, let me check that\", and keep "
+        "helping with anything else meanwhile. If no answer comes, say you do not have that detail right now and carry on.",
         "Accept an offer inside what you may accept (below) without asking. Anything outside it is a question for ask_user.",
         "A call screener (a phone assistant that asks for a name and the reason): give the name and the reason in one "
         "short sentence.",

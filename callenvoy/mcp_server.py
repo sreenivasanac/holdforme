@@ -146,8 +146,7 @@ def build() -> MCPServer:
 
     @tool(server, "answer_question", "Answer the AI's question",
           "Answer a question the AI asked mid-call (open_questions). The AI says it on the line. Answer in a few plain words.", ACT)
-    async def answer_question(call_id: CallId, question_id: Annotated[str, Field(min_length=1, max_length=40)],
-                              answer: Annotated[str, Field(min_length=1, max_length=1000)]) -> CallToolResult:
+    async def answer_question(call_id: CallId, question_id: calls.QuestionId, answer: calls.AnswerText) -> CallToolResult:
         r = await calls.answer_question(call_id, question_id, answer)
         return ok(f'sent to the AI: "{r["answer"]}"', r)
 
@@ -186,8 +185,7 @@ def build() -> MCPServer:
         return ok("\n".join(f"{k}: {v}" for k, v in p.items() if v is not None), p)
 
     async def save_profile(**kw) -> CallToolResult:
-        p = calls.save_profile({k: v for k, v in kw.items() if v is not None})
-        return ok("saved", p)
+        return ok("saved", calls.save_profile(kw))  # None (not given) is skipped there
 
     tool(server, "save_profile", "Save profile and settings",
          "Merge fields into the saved profile and settings. An empty string removes a text field. Wrong values give "

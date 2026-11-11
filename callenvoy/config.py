@@ -21,8 +21,7 @@ LLM_MODEL = "gpt-4.1"
 LLM_TEMPERATURE = 0
 SUMMARY_MODEL = "gpt-4.1"
 TTS_MODEL = "s2.1-pro"
-# End of turn: "smart_turn" (Pipecat default, LocalSmartTurnAnalyzerV3) or "speech_timeout" if too slow on 2 vCPUs.
-TURN_STOP = "smart_turn"
+# End of turn: Pipecat's default (LocalSmartTurnAnalyzerV3). TODO: SpeechTimeoutUserTurnStopStrategy if too slow on 2 vCPUs.
 CALL_SAMPLE_RATE = 8000
 
 # --- Voices (Fish Audio reference ids, searched 2026-11-10). Indian names are our labels. ---
@@ -38,8 +37,8 @@ VOICES = [
     {"name": "Vikram", "gender": "male", "accent": "Indian English", "style": "calm, steady, middle-aged", "reference_id": "ca1c77bf09ee4497ac5cd97c5db1f6d5"},
     {"name": "Meera", "gender": "female", "accent": "Indian English", "style": "friendly, professional, middle-aged", "reference_id": "b1a1d760d9604bdb957a56eec3460f1b"},
 ]
-# Fish Official spares if a listed voice sounds wrong on a phone line: Sheila, Kai, Cody.
-SPARE_VOICES = {"Sheila": "f3a2b90078d54a65af4b95f63bc7798e", "Kai": "0db6e93af420470b9d9b9a886dbaa954", "Cody": "f663fef9788d4ac0a6bfe36f1b3c871f"}
+# Fish Official spares if a listed voice sounds wrong on a phone line: Sheila f3a2b90078d54a65af4b95f63bc7798e,
+# Kai 0db6e93af420470b9d9b9a886dbaa954, Cody f663fef9788d4ac0a6bfe36f1b3c871f.
 VOICE_NAMES = [v["name"] for v in VOICES]
 DEFAULT_VOICE = "Hannah"
 DEMO_REP_VOICE_ID = "1f97ab64476c4e468a0888ae22954dab"  # Fish Official "Hugo"
@@ -67,7 +66,10 @@ QUESTION_WAIT_SECONDS = 120
 MAX_WAIT_SECONDS = 50  # long-poll ceiling for get_call
 HANDOVER_RECENT_SECONDS = 10  # connect_owner needs a "them" line this recent
 END_CALL_SPEECH_WAIT_SECONDS = 15  # how long end_call waits for the last sentence to finish
-BOT_DONE_GRACE_SECONDS = 30  # after the bot ends, wait this long for Twilio's final status
+BOT_DONE_GRACE_SECONDS = 30
+DIAL_TIMEOUT_SECONDS = 90  # no answer and no final status from Twilio in this time: the call is closed as failed
+CALLER_ID_CACHE_SECONDS = 60  # GET /api/caller-id caches Twilio's answer this long
+OUTCOMES = ("done", "not_done", "voicemail", "no_human")  # after the bot ends, wait this long for Twilio's final status
 RECORD_CALLS_DEFAULT = True
 FINAL_STATUSES = ("completed", "no_answer", "busy", "failed", "canceled")
 LIVE_STATUSES = ("queued", "dialing", "in_progress")
@@ -81,13 +83,14 @@ INBOUND_BUSINESS_DAYS = 14  # a callback is named after the newest outbound call
 OWNER_DROP_GRACE_SECONDS = 5
 AUDIO_TICKET_SECONDS = 30
 AUDIO_FIRST_MESSAGE_SECONDS = 5
-OWNER_AUDIO_DOWN_HZ = 8000
 OWNER_AUDIO_UP_HZ = 16000
 AUDIO_DOWN_BYTES = 640  # 40 ms at 8 kHz, 16-bit
 AUDIO_MAX_MESSAGE_BYTES = 4096
 AUDIO_MAX_RATE = 2.0  # mic audio faster than this times real time is dropped
 OWNER_GATHER_SECONDS = 10  # "Press 1 to join" wait on the owner's phone
+OWNER_PROMPT_SECONDS = 15  # margin for answering late and hearing the spoken prompt before the Gather wait
 DEMO_TICKET_SECONDS = 120  # the demo line's stream token lives this long
+DEMO_REP_MAX_SECONDS = 600  # hard limit for one demo rep call
 
 # --- Web push ---
 PUSH_TTL_SECONDS = 60
@@ -127,7 +130,6 @@ SETTINGS.update({k: {"type": "text", "max": n, "default": None} for k, n in PROF
 SETTING_DEFAULTS = {k: v["default"] for k, v in SETTINGS.items()}
 
 # --- Demo line (private test line; Twilio <Say> voice) ---
-DEMO_LINE_NUMBER = "+16562405137"
 DEMO_SAY_VOICE = "Polly.Joanna"
 DEMO_MENU = "Thank you for calling Northstar Internet. This is a demo line. For billing, press 1. For technical support, press 2. For all other questions, press 0."
 DEMO_MENU_RETRY = "Sorry, I didn't get that. For billing, press 1. For technical support, press 2."
@@ -139,6 +141,10 @@ DEMO_HOLD = [  # about 50 s of spoken hold messages with pauses between them
 DEMO_HOLD_PAUSE_SECONDS = 10
 DEMO_REP_NAME = "Maria"
 DEMO_BUSINESS = "Northstar Internet"
+
+
+REQUIRED_ENV = ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER", "DEEPGRAM_API_KEY",
+                "OPENAI_API_KEY", "FISH_API_KEY")
 
 
 def env(name: str, default: str = "") -> str:

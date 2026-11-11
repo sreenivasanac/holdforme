@@ -6,14 +6,15 @@ Browser protocol on WSS /callenvoy/audio/<call_id>:
   server -> client: binary call audio, PCM 16-bit mono 8 kHz, 640 bytes (40 ms) per message
   client -> server: text {"type":"join"} / {"type":"hand_back"}
   client -> server: binary microphone, PCM 16-bit mono 16 kHz (used only while the owner has the call)
-  server -> client: text {"type":"ended"} then close. Errors of join/hand_back: {"type":"error","message":...}
+  server -> client: text {"type":"ended"} then close: the call ended
+  server -> client: text {"type":"replaced"} then close: a newer owner link (another tab, or the phone) took over
+  server -> client: text {"type":"error","message":...} when a join or hand_back is refused
 """
 
 import asyncio
 import base64
 import json
 import logging
-import secrets
 import time
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -21,7 +22,6 @@ from fastapi import WebSocket, WebSocketDisconnect
 from . import calls, config, guard, owner
 
 log = logging.getLogger("callenvoy.owner_audio")
-PHONE_TOKENS: dict[str, str] = {}  # one-use stream token -> call id, for the owner's phone leg
 
 
 def origin_ok(origin: str | None) -> bool:
@@ -72,9 +72,9 @@ class BrowserLink:
     async def send_state(self, owner_state: str, phase: str | None) -> None:
         await self._out(json.dumps({"type": "state", "owner": owner_state, "phase": phase}))
 
-    async def close(self, ended: bool = False) -> None:
-        if ended:
-            await self._out(json.dumps({"type": "ended"}))
+    async def close(self, reason: str | None = None) -> None:
+        if reason:
+            await self._out(json.dumps({"type": reason}))
         if not self.closed:
             self.closed = True
             try:
@@ -148,12 +148,6 @@ async def _command(call_id: str, link: BrowserLink, text: str) -> None:
 
 # --- The owner's phone leg: Twilio Media Streams JSON with base64 mu-law, read without a Pipecat transport ---
 
-def issue_phone_token(call_id: str) -> str:
-    token = secrets.token_urlsafe(32)
-    PHONE_TOKENS[token] = call_id
-    return token
-
-
 async def decode_media(payload_b64: str, resampler) -> bytes:
     from pipecat.audio.utils import ulaw_to_pcm
 
@@ -191,7 +185,7 @@ class PhoneLink:
     async def send_state(self, owner_state: str, phase: str | None) -> None:
         pass  # the phone has no screen
 
-    async def close(self, ended: bool = False) -> None:
+    async def close(self, reason: str | None = None) -> None:
         if not self.closed:
             self.closed = True
             try:
@@ -200,9 +194,9 @@ class PhoneLink:
                 pass
 
 
-async def phone_socket(ws: WebSocket, token: str) -> None:
-    call_id = PHONE_TOKENS.pop(token, None)
-    if not call_id or call_id not in calls.LIVE:
+async def phone_socket(ws: WebSocket, call_id: str, token: str) -> None:
+    """The stream token is a one-use guard ticket bound to "owner:<call_id>"."""
+    if not guard.take_ticket(token, f"owner:{call_id}") or call_id not in calls.LIVE:
         await ws.close(code=1008)
         return
     await ws.accept()

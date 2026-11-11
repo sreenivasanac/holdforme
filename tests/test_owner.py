@@ -58,6 +58,7 @@ class Bot:
 class Link:
     def __init__(self, kind="app"):
         self.kind, self.rate, self.closed, self.states, self.audio = kind, 16000 if kind == "app" else 8000, False, [], []
+        self.reason = None
 
     async def send_audio(self, pcm):
         self.audio.append(pcm)
@@ -65,8 +66,8 @@ class Link:
     async def send_state(self, o, phase):
         self.states.append(o)
 
-    async def close(self, ended=False):
-        self.closed = True
+    async def close(self, reason=None):
+        self.closed, self.reason = True, reason
 
 
 def live_call(monkeypatch, **kw):
@@ -94,7 +95,9 @@ def test_app_then_phone_goes_alert_ring_no_answer(monkeypatch, fresh):
         assert owner.view(cid)["state"] == "alerting"
         await clock.advance(1)
         assert owner.view(cid)["state"] == "ringing" and len(owner_legs(fresh)) == 1
-        await clock.advance(35)
+        await clock.advance(49)  # ring 25 + prompt margin 15 + gather 10
+        assert owner.view(cid)["state"] == "ringing"
+        await clock.advance(1)
         v = owner.view(cid)
         assert v["state"] == "none" and v["unreachable"] is True
         assert any("could not be reached" in t for t in bot.told)
@@ -113,29 +116,83 @@ def test_app_alone_skips_the_ring(monkeypatch, fresh):
     run(go())
 
 
-def test_join_during_alert_and_ring_stops_timers(monkeypatch, fresh):
+def test_listening_without_joining_still_falls_back(monkeypatch, fresh):
+    """Fix 4: opening the audio during a hand-over alert keeps the fallback timer."""
+    cid, clock, bot = live_call(monkeypatch, mode="transfer", reach="app")
+
+    async def go():
+        await owner.handover(cid)
+        await owner.attach(cid, Link())  # listen only, never joins
+        assert owner.view(cid)["state"] == "listening"
+        await clock.advance(20)
+        v = owner.view(cid)
+        assert v["unreachable"] and v["state"] == "listening"  # still hears the call
+        assert store.get_call(cid)["phase"] == "talking" and any("could not be reached" in t for t in bot.told)
+    run(go())
+
+
+def test_listening_then_phone_rings_after_alert(monkeypatch, fresh):
     cid, clock, bot = live_call(monkeypatch, mode="transfer")
 
     async def go():
         await owner.handover(cid)
-        await owner.attach(cid, Link())  # the console opened the audio during the alert
-        await clock.advance(100)
-        assert owner.view(cid)["state"] == "listening" and not owner_legs(fresh)
+        await owner.attach(cid, Link())
+        await clock.advance(20)
+        assert owner.view(cid)["state"] == "ringing" and len(owner_legs(fresh)) == 1
+    run(go())
+
+
+def test_join_stops_the_fallback(monkeypatch, fresh):
+    cid, clock, bot = live_call(monkeypatch, mode="transfer")
+
+    async def go():
+        await owner.handover(cid)
+        await owner.attach(cid, Link())
         await owner.join(cid)
-        assert owner.view(cid)["state"] == "on_call" and ("take_over", 16000) in bot.log
+        await clock.advance(100)
+        assert owner.view(cid)["state"] == "on_call" and not owner_legs(fresh) and ("take_over", 16000) in bot.log
         assert store.get_call(cid)["phase"] == "owner_on_call"
     run(go())
 
-    cid2, clock2, bot2 = live_call(monkeypatch, mode="transfer", reach="phone")
 
-    async def ring():
-        await owner.handover(cid2)
-        assert owner.view(cid2)["state"] == "ringing"
-        await owner.attach(cid2, Link("phone"))  # pressed 1: join at once
-        await clock2.advance(100)
-        assert owner.view(cid2) == {"state": "on_call", "via": "phone", "alert_until": None, "unreachable": False}
-    store.update_call(cid, status="completed")
-    run(ring())
+def test_phone_rung_to_join_takes_the_call_on_link(monkeypatch, fresh):
+    cid, clock, bot = live_call(monkeypatch, mode="transfer", reach="phone")
+
+    async def go():
+        await owner.handover(cid)
+        assert owner.view(cid)["state"] == "ringing"
+        await owner.attach(cid, Link("phone"))  # pressed 1: join at once
+        await clock.advance(100)
+        assert owner.view(cid) == {"state": "on_call", "via": "phone", "alert_until": None, "unreachable": False}
+    run(go())
+
+
+def test_connect_phone_rings_even_with_browser_link(monkeypatch, fresh):
+    """Contract 6 and 7: reach phone rings although a browser link is open; the phone link then replaces it."""
+    cid, clock, bot = live_call(monkeypatch)
+
+    async def go():
+        browser = Link()
+        await owner.attach(cid, browser)
+        msg = await owner.connect(cid, "join", "phone")
+        assert "ringing" in msg and len(owner_legs(fresh)) == 1 and owner.view(cid)["state"] == "ringing"
+        await owner.attach(cid, Link("phone"))
+        assert browser.closed and browser.reason == "replaced"
+        assert owner.view(cid)["state"] == "on_call" and owner.view(cid)["via"] == "phone"
+    run(go())
+
+
+def test_no_owner_entry_after_end(monkeypatch, fresh):
+    cid, clock, bot = live_call(monkeypatch)
+
+    async def go():
+        link = Link()
+        await owner.attach(cid, link)
+        await calls.finish(cid)
+        assert link.reason == "ended"
+        owner.get(cid).state = "on_call"
+        assert cid not in owner.OWNERS and owner.view(cid)["state"] == "none"
+    run(go())
 
 
 def test_wait_on_hold_cancels_the_alert(monkeypatch, fresh):

@@ -33,3 +33,18 @@ def test_restart_cleanup_hangs_up_orphans(fresh):
     row = store.get_call(v["id"])
     assert row["status"] == "failed" and row["error"] == "server restarted"
     assert {sid for sid, kw in fresh.updated if kw.get("hang_up")} == {row["twilio_sid"], "CAowner"}
+
+
+def test_data_dir_and_files_are_private(tmp_path):
+    """Fix 5: data/ is 700; with the service's umask 077 the db, -wal and -shm files are 600."""
+    import os
+
+    old = os.umask(0o077)
+    try:
+        store.open_db(tmp_path / "data" / "callenvoy.db")
+        store.save_profile({"name": "Alex"})
+        assert (tmp_path / "data").stat().st_mode & 0o777 == 0o700
+        for f in (tmp_path / "data").iterdir():
+            assert f.stat().st_mode & 0o077 == 0, f.name
+    finally:
+        os.umask(old)

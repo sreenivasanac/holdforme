@@ -7,10 +7,7 @@ import secrets
 from xml.sax.saxutils import escape, quoteattr
 
 from . import config, guard
-
-
-def _xml(body: str) -> str:
-    return f'<?xml version="1.0" encoding="UTF-8"?><Response>{body}</Response>'
+from .twilio_api import twiml as _xml
 
 
 def _say(text: str) -> str:
@@ -22,9 +19,8 @@ def wss_url(path: str) -> str:
     return ("wss://" + base[len("https://"):] if base.startswith("https://") else "ws://" + base.split("://", 1)[-1]) + path
 
 
-def stream(path: str, params: dict | None = None) -> str:
-    inner = "".join(f"<Parameter name={quoteattr(k)} value={quoteattr(v)}/>" for k, v in (params or {}).items())
-    return f"<Connect><Stream url={quoteattr(wss_url(path))}>{inner}</Stream></Connect>"
+def stream(path: str) -> str:
+    return f"<Connect><Stream url={quoteattr(wss_url(path))}/></Connect>"
 
 
 def twiml(step: str | None, retry: bool) -> str:
@@ -33,7 +29,7 @@ def twiml(step: str | None, retry: bool) -> str:
         pause = f'<Pause length="{config.DEMO_HOLD_PAUSE_SECONDS}"/>'
         hold = pause.join(_say(t) for t in config.DEMO_HOLD)
         ticket = guard.issue_ticket("demo_rep", config.DEMO_TICKET_SECONDS)
-        return _xml(hold + pause + stream(f"/twilio/media/{ticket}", {"role": "demo_rep"}))
+        return _xml(hold + pause + stream(f"/twilio/media/{ticket}"))
     # Phone menu; any key goes to billing. One retry, then billing anyway so the test never stalls.
     action = quoteattr(f"{self_url}?step=hold")
     nxt = escape(f"{self_url}?step=hold" if retry else f"{self_url}?step=menu&try=1")
@@ -57,5 +53,5 @@ Rules:
 - When the caller says goodbye, say goodbye and call end_call."""
 
 
-def inbound_twiml() -> str:
+def refuse_twiml() -> str:
     return _xml(_say("This number does not take calls.") + "<Hangup/>")

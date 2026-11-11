@@ -52,6 +52,7 @@ def open_db(path: Path | str | None = None) -> None:
     path = path or config.DB_PATH
     if str(path) != ":memory:":
         Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).parent.chmod(0o700)  # personal data at rest (section 22.4)
     db = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")
@@ -81,12 +82,18 @@ def insert_call(row: dict) -> None:
     on_change(row["id"])
 
 
-def update_call(call_id: str, **fields) -> None:
+def update_call(call_id: str, if_status: str | None = None, **fields) -> bool:
+    """Updates a call row; with if_status only while the row still has that status. True when a row changed."""
     if not fields:
-        return
+        return False
     sets = ", ".join(f"{k} = ?" for k in fields)  # keys are code constants, never user input
-    _q(f"UPDATE calls SET {sets} WHERE id = ?", (*fields.values(), call_id))
-    on_change(call_id)
+    sql, args = f"UPDATE calls SET {sets} WHERE id = ?", (*fields.values(), call_id)
+    if if_status:
+        sql, args = sql + " AND status = ?", (*args, if_status)
+    changed = _q(sql, args).rowcount > 0
+    if changed:
+        on_change(call_id)
+    return changed
 
 
 def get_call(call_id: str) -> dict | None:

@@ -9,9 +9,10 @@ Wants=network-online.target
 User=agent
 WorkingDirectory=/home/agent/apps/holdforme
 EnvironmentFile=/home/agent/apps/holdforme/.env
-ExecStart=/home/agent/.local/bin/uv run --frozen uvicorn callenvoy.main:app --host 127.0.0.1 --port 3020 --no-access-log
+ExecStart=/home/agent/.local/bin/uv run --frozen --no-dev uvicorn callenvoy.main:app --host 127.0.0.1 --port 3020 --no-access-log
 Restart=always
 RestartSec=3
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
