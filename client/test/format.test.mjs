@@ -24,6 +24,11 @@ test('merges close fragments of one speaker and keeps the first n and at', () =>
   ]);
 });
 
+test('a merged bubble takes the first known at, when the first fragment has none', () => {
+  const out = mergeLines([l(0, 0, 'them', 'a', null), l(1, 2, 'them', 'b', 2.4), l(2, 4, 'them', 'c', 4.1)]);
+  assert.deepEqual(out.map((x) => [x.text, x.at]), [['a b c', 2.4]]);
+});
+
 test('an event between fragments stops the merge, and events never merge', () => {
   const out = mergeLines([l(0, 0, 'them', 'a'), l(1, 1, 'event', 'pressed 1'), l(2, 2, 'event', 'waiting'), l(3, 3, 'them', 'b')]);
   assert.equal(out.length, 4);

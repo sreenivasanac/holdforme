@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AppState, StyleSheet, Text, View } from 'react-native';
 import { api, type ApiKey } from '../api';
+import { installPrompt, setup, type Client } from '../agentSetup';
 import { ago, when } from '../format';
 import { border, color, font, radius, space } from '../theme';
 import { Loading } from './Loading';
@@ -45,24 +46,29 @@ export function useConnectionCheck(fresh: FreshKey | null, onKeys: (k: ApiKey[])
     if (!fresh) return;
     setState('waiting');
     const until = Date.now() + CHECK_FOR_MS;
-    const t = setInterval(async () => {
-      if (Date.now() > until) {
-        clearInterval(t);
-        return setState('timeout');
-      }
-      if (AppState.currentState !== 'active') return; // hidden tab: no requests
-      try {
-        const { keys } = await api.keys();
-        onKeys(keys);
-        if (keys.find((k) => k.id === fresh.id)?.last_used_at) {
-          clearInterval(t);
-          setState('connected');
+    let cancelled = false;
+    let t: ReturnType<typeof setTimeout>;
+    // One request at a time; an answer that arrives after cleanup is dropped.
+    const tick = async () => {
+      if (Date.now() > until) return setState('timeout');
+      if (AppState.currentState === 'active') {
+        // a hidden tab sends no requests
+        try {
+          const { keys } = await api.keys();
+          if (cancelled) return;
+          onKeys(keys);
+          if (keys.find((k) => k.id === fresh.id)?.last_used_at) return setState('connected');
+        } catch {
+          // the next round tries again
         }
-      } catch {
-        // the next round tries again
       }
-    }, CHECK_EVERY_MS);
-    return () => clearInterval(t);
+      if (!cancelled) t = setTimeout(tick, CHECK_EVERY_MS);
+    };
+    t = setTimeout(tick, CHECK_EVERY_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
   }, [fresh, onKeys, round]);
   return { state, again: () => setRound((r) => r + 1) };
 }
@@ -227,7 +233,6 @@ function FreshKeyPanel({ fresh, check, onDone }: { fresh: FreshKey; check: Retur
   );
 }
 
-type Client = 'claude_code' | 'codex' | 'desktop' | 'cursor' | 'url';
 const CLIENTS = [
   ['claude_code', 'Claude Code'],
   ['codex', 'Codex'],
@@ -235,38 +240,6 @@ const CLIENTS = [
   ['cursor', 'Cursor'],
   ['url', 'Grok bot, claude.ai, ChatGPT'],
 ] as const;
-
-/** The set-up text for each client, with the key (or YOUR_KEY). */
-export function setup(url: string, key: string): Record<Client, { help: string; code: string; warn?: string }> {
-  return {
-    claude_code: { help: 'Run once in a terminal.', code: `claude mcp add --scope user --transport http callenvoy ${url} --header "Authorization: Bearer ${key}"` },
-    codex: { help: 'Add to ~/.codex/config.toml.', code: `[mcp_servers.callenvoy]\nurl = "${url}"\nhttp_headers = { Authorization = "Bearer ${key}" }` },
-    desktop: {
-      help: 'Add to claude_desktop_config.json, then restart Claude Desktop.',
-      code: `{"mcpServers": {"callenvoy": {\n  "command": "npx",\n  "args": ["mcp-remote", "${url}",\n    "--header", "Authorization: Bearer ${key}"]\n}}}`,
-    },
-    cursor: {
-      help: 'Add to ~/.cursor/mcp.json.',
-      code: `{"mcpServers": {"callenvoy": {\n  "url": "${url}",\n  "headers": {"Authorization": "Bearer ${key}"}\n}}}`,
-    },
-    url: {
-      help: 'For clients without headers (Grok bot, claude.ai or ChatGPT custom connector): paste this as the server address.',
-      code: `${url}/${key}`,
-      warn: 'The key is part of this address. Anyone with it can place calls. Use a header form when the client supports it.',
-    },
-  };
-}
-
-export function installPrompt(url: string, key: string) {
-  return [
-    'Add the CallEnvoy MCP server to your MCP settings, so you can place phone calls for me.',
-    `Server address: ${url}`,
-    `Send this header: Authorization: Bearer ${key}`,
-    `If you cannot send headers, use this address instead: ${url}/${key}`,
-    'Then call the tool callenvoy_get_profile to check that the connection works, and tell me the name it shows.',
-    'Then ask me what the first call should be.',
-  ].join('\n');
-}
 
 export function SetupCard({ url, fresh }: { url: string; fresh: FreshKey | null }) {
   const [client, setClient] = useState<Client>('claude_code');

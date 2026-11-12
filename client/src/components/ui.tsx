@@ -1,5 +1,5 @@
 // Small shared UI parts. All values come from theme.ts.
-import { type ReactNode, useId, useState } from 'react';
+import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
 import {
   Clipboard,
   Modal,
@@ -359,6 +359,8 @@ export function Disclosure({ title, children, open, onToggle }: { title: string;
 /** A code block with a Copy button. */
 export function CopyBlock({ code, name }: { code: string; name: string }) {
   const [copied, setCopied] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
   return (
     <View style={s.block}>
       <Text style={[text.mono, s.blockText]} selectable>
@@ -373,7 +375,8 @@ export function CopyBlock({ code, name }: { code: string; name: string }) {
           onPress={() => {
             Clipboard.setString(code);
             setCopied(true);
-            setTimeout(() => setCopied(false), 2000);
+            clearTimeout(timer.current);
+            timer.current = setTimeout(() => setCopied(false), 2000);
           }}
         />
       </View>

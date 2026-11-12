@@ -6,6 +6,7 @@
 //   POST /__mock/mail?ready=0|1         email sign-in configured or not (GET /api/auth/me mail_ready)
 //   POST /__mock/expire                 ends every session (the next request gets 401 session_expired)
 //   POST /__mock/recording?fail=1|0     /r/demo answers 404 (to see the player's error state)
+//   POST /__mock/recording?unknown=1|0  the call view gives duration_seconds 0 (length not known)
 //   POST /__mock/calls?set=empty|many  switches the call list
 //   POST /__mock/socket?id=<call>&send=replaced|error|drop   acts on that call's open audio socket
 //   POST /__mock/alert?id=<call>&state=alerting|none&seconds=20   starts or ends an alert (a new alert_until each time)
@@ -283,8 +284,9 @@ async function api(req, res, p, q) {
   if (p.startsWith('/api/auth/')) return auth(req, res, p);
   const who = credential(req);
   if (who !== 'owner' && who !== 'agent') return send(res, 401, { error: ERRORS[who], code: who });
-  const ownerOnly = p.startsWith('/api/keys') || p.startsWith('/api/push/');
-  if (who === 'agent' && ownerOnly) return send(res, 401, { error: 'This needs the owner sign-in; an API key is not enough.', code: 'no_credential' });
+  // As the server: keys, push and the audio ticket (it lets its holder hear and speak on a call) are for the owner only.
+  const ownerOnly = p.startsWith('/api/keys') || p.startsWith('/api/push/') || p.endsWith('/audio-ticket');
+  if (who === 'agent' && ownerOnly) return send(res, 403, { error: 'agent keys cannot use this; sign in to the console', code: 'owner_only' });
   const origin = req.headers.origin;
   if (who === 'owner' && req.method !== 'GET' && origin && origin !== `http://localhost:${PORT}`) return send(res, 403, { detail: 'Wrong origin.' });
   if (p.startsWith('/api/keys')) return keyRoutes(req, res, p);
@@ -416,7 +418,12 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/__mock/last-link') return send(res, 200, { url: lastLink });
   if (url.pathname === '/__mock/mail') { mailReady = url.searchParams.get('ready') !== '0'; return send(res, 200, { mail_ready: mailReady }); }
   if (url.pathname === '/__mock/expire') { sessions.clear(); return send(res, 200, { ok: true }); }
-  if (url.pathname === '/__mock/recording') { recordingFails = url.searchParams.get('fail') === '1'; return send(res, 200, { fail: recordingFails }); }
+  if (url.pathname === '/__mock/recording') {
+    const q = url.searchParams;
+    if (q.has('fail')) recordingFails = q.get('fail') === '1';
+    if (q.has('unknown')) for (const c of calls) for (const r of c.recordings ?? []) r.duration_seconds = q.get('unknown') === '1' ? 0 : RECORDING_SECONDS;
+    return send(res, 200, { fail: recordingFails });
+  }
   if (url.pathname === '/__mock/count') return send(res, 200, { count: counts[url.searchParams.get('id')] ?? 0 });
   if (url.pathname === '/__mock/calls') { const set = url.searchParams.get('set'); calls = set === 'empty' ? [] : sampleCalls(); return send(res, 200, { calls: calls.length }); }
   if (!url.pathname.startsWith('/callenvoy')) return send(res, 404, { detail: 'Not found' });

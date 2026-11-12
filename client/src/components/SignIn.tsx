@@ -13,19 +13,23 @@ const SIGNIN_COMMAND = 'uv run python -m callenvoy.signin';
 export function SignInGate() {
   const { me } = useSession();
   const [email, setEmail] = useState('');
-  const [sentAt, setSentAt] = useState<number | null>(null);
+  const [sentAt, setSentAt] = useState<number | null>(null); // the last link request; kept when going back to the address
+  const [checking, setChecking] = useState(false); // "Check your email" shown
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const now = useNow(1000, sentAt != null);
-  const wait = sentAt ? Math.min(RESEND_SECONDS, Math.max(0, RESEND_SECONDS - Math.floor((now - sentAt) / 1000))) : 0;
+  const left = (t: number) => (sentAt ? Math.min(RESEND_SECONDS, Math.max(0, RESEND_SECONDS - Math.floor((t - sentAt) / 1000))) : 0);
+  const now = useNow(1000, left(Date.now()) > 0); // ticks only while there is a wait
+  const wait = left(now);
 
   const send = async () => {
+    if (left(Date.now()) > 0) return; // Enter in the field during the wait
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) return setError('Enter your email address, like name@example.com.');
     setBusy(true);
     setError(null);
     try {
       await api.requestLink(email.trim());
       setSentAt(Date.now());
+      setChecking(true);
     } catch (e) {
       setError((e as Error).message);
     }
@@ -43,7 +47,7 @@ export function SignInGate() {
       </Gate>
     );
 
-  if (sentAt)
+  if (checking)
     return (
       <Gate>
         <Text style={text.brand}>CallEnvoy</Text>
@@ -57,7 +61,7 @@ export function SignInGate() {
           disabled={wait > 0}
           onPress={send}
         />
-        <Button label="Use another address" kind="link" onPress={() => setSentAt(null)} />
+        <Button label="Use another address" kind="link" onPress={() => setChecking(false)} />
       </Gate>
     );
 
@@ -77,7 +81,7 @@ export function SignInGate() {
         onSubmitEditing={send}
         error={error}
       />
-      <Button label={busy ? 'Sending...' : 'Send sign-in link'} busy={busy} onPress={send} />
+      <Button label={busy ? 'Sending...' : wait ? `Send sign-in link (${wait} s)` : 'Send sign-in link'} busy={busy} disabled={wait > 0} onPress={send} />
       <T v="fine">{`No email? Run ${SIGNIN_COMMAND} on the server for a link.`}</T>
     </Gate>
   );
@@ -89,15 +93,21 @@ export function SignInLink({ token }: { token: string | undefined }) {
   const [busy, setBusy] = useState(false);
   const [bad, setBad] = useState(!token);
   const [error, setError] = useState<string | null>(null);
+  const [verified, setVerified] = useState(false); // the link is used up: a retry only loads the account
 
   const signIn = async () => {
     setBusy(true);
     setError(null);
     try {
-      await api.verifyLink(token!);
-      await reload();
-      router.replace('/');
-      return;
+      if (!verified) {
+        await api.verifyLink(token!);
+        setVerified(true);
+      }
+      if (await reload()) {
+        router.replace('/');
+        return;
+      }
+      setError('You are signed in, but the console could not load. Check your connection and try again.');
     } catch (e) {
       if (e instanceof ApiError && e.code === 'bad_link') setBad(true);
       else setError((e as Error).message);

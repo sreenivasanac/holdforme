@@ -17,10 +17,12 @@ const message = (e: unknown) => (e instanceof Error ? e.message : 'Something wen
 export type Session = {
   me: AuthMe | null; // null while loading
   error: string | null;
-  reload: () => Promise<void>;
+  /** Asks the server who is signed in; false when that failed (the error is in `error`). */
+  reload: () => Promise<boolean>;
+  /** Throws when the server could not sign out. */
   signOut: () => Promise<void>;
 };
-export const SessionContext = createContext<Session>({ me: null, error: null, reload: async () => {}, signOut: async () => {} });
+export const SessionContext = createContext<Session>({ me: null, error: null, reload: async () => false, signOut: async () => {} });
 export const useSession = () => useContext(SessionContext);
 
 /** Creates the session value for the root layout. An expired session anywhere shows the sign-in screen. */
@@ -31,8 +33,10 @@ export function useSessionState(): Session {
     setError(null);
     try {
       setMe(await api.me());
+      return true;
     } catch (e) {
       setError(message(e));
+      return false;
     }
   }, []);
   const out = useCallback(() => setMe((m) => (m ? { ...m, signed_in: false, email: null } : m)), []);
@@ -42,7 +46,11 @@ export function useSessionState(): Session {
     void reload();
   }, [out, reload]);
   const signOut = useCallback(async () => {
-    await api.signOut().catch(() => {}); // signed out in this tab either way
+    try {
+      await api.signOut();
+    } catch (e) {
+      if (!(e instanceof ApiError && e.status === 401)) throw e; // 401: the session had already ended
+    }
     out();
   }, [out]);
   return { me, error, reload, signOut };

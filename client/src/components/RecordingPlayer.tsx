@@ -3,11 +3,13 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Linking, StyleSheet, Text, View, type GestureResponderEvent } from 'react-native';
 import { duration as fmt } from '../format';
 import { openPlayer, type Player } from '../platform/audio';
+import { focusRingProps } from '../platform/focus';
 import { border, color, font, radius, seekBar, space } from '../theme';
 import { Button, Note, T } from './ui';
 
 const KEY_STEP = 5; // seconds per arrow key
 const PAGE_STEP = 30; // seconds per Page Up / Page Down
+const total = (d: number) => (d > 0 ? fmt(d) : '--:--'); // 0 = length not known yet
 
 export type PlayerControl = {
   time: number;
@@ -20,7 +22,7 @@ export type PlayerControl = {
   seek: (t: number, play?: boolean) => void;
 };
 
-/** One recording. `knownDuration` (from the server) shows until the file says its own length. */
+/** One recording. `knownDuration` (from the server; 0 = unknown) shows until the file says its own length. */
 export function usePlayer(url: string, knownDuration: number): PlayerControl {
   const [time, setTime] = useState(0);
   const [length, setLength] = useState(knownDuration);
@@ -46,7 +48,7 @@ export function usePlayer(url: string, knownDuration: number): PlayerControl {
       error,
       toggle: () => (playing ? player.current?.pause() : play()),
       seek: (t, andPlay) => {
-        player.current?.seek(Math.max(0, Math.min(length, t)));
+        player.current?.seek(Math.max(0, length > 0 ? Math.min(length, t) : t)); // unknown length: no upper bound
         if (andPlay && !playing) play();
       },
     };
@@ -62,12 +64,11 @@ export function RecordingPlayer({ player, url }: { player: PlayerControl; url: s
           label={p.playing ? 'Pause' : 'Play'}
           a11yLabel={p.playing ? 'Pause recording' : 'Play recording'}
           size="small"
-          busy={p.loading}
-          onPress={p.toggle}
+          onPress={p.toggle} // not busy while buffering: Pause must still work
         />
         <SeekBar time={p.time} duration={p.duration} onSeek={(t) => p.seek(t)} />
         <Text style={s.time} aria-hidden>
-          {fmt(p.time)} / {fmt(p.duration)}
+          {fmt(p.time)} / {total(p.duration)}
         </Text>
       </View>
       {p.error ? (
@@ -105,21 +106,22 @@ function SeekBar({ time, duration, onSeek }: { time: number; duration: number; o
     PageDown: time - PAGE_STEP,
     PageUp: time + PAGE_STEP,
     Home: 0,
-    End: duration,
+    ...(duration > 0 ? { End: duration } : {}),
   };
   return (
     <View
       role="slider"
       focusable
+      {...focusRingProps()}
       aria-label="Position in the recording"
       aria-valuemin={0}
-      aria-valuemax={Math.round(duration)}
+      aria-valuemax={duration > 0 ? Math.round(duration) : undefined}
       aria-valuenow={Math.round(shown)}
-      aria-valuetext={`${fmt(shown)} of ${fmt(duration)}`}
+      aria-valuetext={duration > 0 ? `${fmt(shown)} of ${fmt(duration)}` : `${fmt(shown)}, length not known yet`}
       style={s.seek}
       onLayout={(e) => (width.current = e.nativeEvent.layout.width || 1)}
-      onStartShouldSetResponder={() => true}
-      onMoveShouldSetResponder={() => true}
+      onStartShouldSetResponder={() => duration > 0} // a position on the track means nothing without the length
+      onMoveShouldSetResponder={() => duration > 0}
       onResponderTerminationRequest={() => false}
       onResponderGrant={(e) => {
         left.current = e.nativeEvent.pageX - e.nativeEvent.locationX;

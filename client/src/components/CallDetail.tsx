@@ -4,6 +4,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View, type PressableStateCallb
 import { api, type Call, type Line, type Question } from '../api';
 import { callSeconds, clock, duration, lineAt, mergeLines, modeLine, phone, RESULT_TEXT, statusLabel, stepIndex, STEPS, when } from '../format';
 import { useNow } from '../hooks';
+import { focusRingProps } from '../platform/focus';
 import { border, color, font, lineHeight, lineMaxWidth, radius, space, transcriptHeight, useWide } from '../theme';
 import { StatusBadge } from './CallList';
 import { RecordingPlayer, usePlayer, type PlayerControl } from './RecordingPlayer';
@@ -189,6 +190,7 @@ function LineView({ line, them, start, now, onJump }: { line: Line; them: string
       aria-label={`Jump to ${at}. ${who}: ${line.text}`}
       aria-current={now ? 'true' : undefined}
       onPress={onJump}
+      {...focusRingProps()}
       style={(st: PressableStateCallbackType & { hovered?: boolean }) => [bubble, s.lineJump, st.hovered && s.lineHover, now && s.lineNow]}
     >
       {body}

@@ -133,14 +133,14 @@ export const MERGE_GAP_SECONDS = 10;
 
 const seconds = (l: Line) => Date.parse(l.t) / 1000;
 
-/** Joins consecutive fragments of the same speaker that are close in time. The first fragment's n, t and `at` are kept. */
+/** Joins consecutive fragments of the same speaker that are close in time. The first fragment's n and t are kept, and the first known `at`. */
 export function mergeLines(lines: Line[], gap = MERGE_GAP_SECONDS): Line[] {
   const out: Line[] = [];
   let prev: Line | null = null; // the last fragment taken in, for the time gap
   for (const l of lines) {
     const last = out[out.length - 1];
     if (last && prev && l.who !== 'event' && l.who === last.who && Math.abs(seconds(l) - seconds(prev)) <= gap) {
-      out[out.length - 1] = { ...last, text: `${last.text} ${l.text}` };
+      out[out.length - 1] = { ...last, text: `${last.text} ${l.text}`, at: last.at ?? l.at };
     } else {
       out.push(l);
     }

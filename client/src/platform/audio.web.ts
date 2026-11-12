@@ -258,19 +258,31 @@ export type PlayerEvents = {
 };
 export type Player = { play: () => void; pause: () => void; seek: (t: number) => void; close: () => void };
 
-/** A recording that can seek (the server answers Range requests). Loads on first use; after an error the next play loads again. */
+/** A recording that can seek (the server answers Range requests). Loads its length at once; after an error the next play loads again. */
 export function openPlayer(url: string, ev: PlayerEvents): Player {
   let a: HTMLAudioElement | null = null;
+  let pending: number | null = null; // a seek asked for before the length was known (Safari ignores it then)
   const pause = () => {
     a?.pause();
     if (stopCurrent === pause) stopCurrent = null;
   };
+  // No more events from this element, and its download stops.
+  const detach = (x: HTMLAudioElement) => {
+    x.ontimeupdate = x.ondurationchange = x.onwaiting = x.onplaying = x.onpause = x.onerror = x.onloadedmetadata = null;
+    x.removeAttribute('src');
+    x.load();
+    if (a === x) a = null;
+  };
   const audio = () => {
     if (a) return a;
-    const x = new Audio(url);
+    const x = new Audio();
     x.preload = 'metadata';
     x.ontimeupdate = () => ev.onTime(x.currentTime);
     x.ondurationchange = () => Number.isFinite(x.duration) && ev.onDuration(x.duration);
+    x.onloadedmetadata = () => {
+      if (pending != null) x.currentTime = pending;
+      pending = null;
+    };
     x.onwaiting = () => ev.onLoading(true);
     x.onplaying = () => {
       ev.onLoading(false);
@@ -278,14 +290,16 @@ export function openPlayer(url: string, ev: PlayerEvents): Player {
     };
     x.onpause = () => ev.onPlaying(false);
     x.onerror = () => {
-      a = null;
+      detach(x);
       ev.onLoading(false);
       ev.onPlaying(false);
       ev.onError();
     };
+    x.src = url;
     a = x;
     return x;
   };
+  audio(); // the length shows before Play
   return {
     play: () => {
       const x = audio();
@@ -296,16 +310,14 @@ export function openPlayer(url: string, ev: PlayerEvents): Player {
     },
     pause,
     seek: (t) => {
-      audio().currentTime = t;
+      const x = audio();
+      if (x.readyState < HTMLMediaElement.HAVE_METADATA) pending = t;
+      else x.currentTime = t;
       ev.onTime(t);
     },
     close: () => {
       pause();
-      if (!a) return;
-      a.onerror = a.onpause = a.ontimeupdate = null; // no events after close
-      a.removeAttribute('src');
-      a.load(); // stops the download
-      a = null;
+      if (a) detach(a);
     },
   };
 }
