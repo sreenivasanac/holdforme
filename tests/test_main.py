@@ -63,7 +63,7 @@ def test_console_call_flow_and_errors(client):
     assert v["status"] == "dialing" and v["direction"] == "outbound" and v["calling_number"] == "+19186021019"
     assert v["leave_voicemail"] is True and v["recordings"] == [] and v["owner"]["state"] == "none"
     assert client.get("/callenvoy/api/calls", headers=AUTH).json()[0]["id"] == cid
-    assert client.post(f"/callenvoy/api/calls/{cid}/audio-ticket", headers=AUTH).status_code == 409
+    assert client.post(f"/callenvoy/api/calls/{cid}/audio-ticket", headers=owner_cookie()).status_code == 409
     assert client.put("/callenvoy/api/profile", json={"mode": "x"}, headers=AUTH).json()["field"] == "mode"
     assert client.put("/callenvoy/api/profile", json={"name": "Alex"}, headers=AUTH).json()["name"] == "Alex"
     assert client.get("/callenvoy/api/caller-id", headers=AUTH).json() == {"number": None, "verified": False}
@@ -208,7 +208,7 @@ def test_audio_socket_tickets(client):
         with pytest.raises(WebSocketDisconnect) as e:
             ws.receive_text()
         assert e.value.code == 4401
-    ticket = client.post(f"/callenvoy/api/calls/{cid}/audio-ticket", headers=AUTH).json()["ticket"]
+    ticket = client.post(f"/callenvoy/api/calls/{cid}/audio-ticket", headers=owner_cookie()).json()["ticket"]
     with client.websocket_connect(f"/callenvoy/audio/{cid}") as ws:
         ws.send_text(json.dumps({"ticket": ticket}))
         assert json.loads(ws.receive_text()) == {"type": "state", "owner": "listening", "phase": None}
@@ -220,8 +220,8 @@ def test_audio_socket_tickets(client):
         with pytest.raises(WebSocketDisconnect):
             ws.receive_text()
     # Contract 7: a second link replaces the first, which is told {"type": "replaced"} before it is closed
-    t1 = client.post(f"/callenvoy/api/calls/{cid}/audio-ticket", headers=AUTH).json()["ticket"]
-    t2 = client.post(f"/callenvoy/api/calls/{cid}/audio-ticket", headers=AUTH).json()["ticket"]
+    t1 = client.post(f"/callenvoy/api/calls/{cid}/audio-ticket", headers=owner_cookie()).json()["ticket"]
+    t2 = client.post(f"/callenvoy/api/calls/{cid}/audio-ticket", headers=owner_cookie()).json()["ticket"]
     with client.websocket_connect(f"/callenvoy/audio/{cid}") as first:
         first.send_text(json.dumps({"ticket": t1}))
         assert json.loads(first.receive_text())["type"] == "state"

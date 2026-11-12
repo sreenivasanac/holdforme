@@ -78,8 +78,11 @@ def create_key(name: str, key: str | None = None) -> tuple[dict, str]:
 def import_env_key() -> None:
     """First start after the move to several keys: the single CALLENVOY_API_KEY becomes the first stored key."""
     key = config.env("CALLENVOY_API_KEY").strip()
-    if key and not store.keys():
+    # Only once per database (SQLite user_version marks it): a key that the owner deleted must not come back
+    # at the next start while the variable is still in .env.
+    if key and not store.keys() and not store.env_key_imported():
         create_key(config.IMPORTED_KEY_NAME, key)
+        store.env_key_imported(mark=True)
         log.warning("imported CALLENVOY_API_KEY as \"%s\"; it can now be removed from .env", config.IMPORTED_KEY_NAME)
 
 

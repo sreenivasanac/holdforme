@@ -72,6 +72,13 @@ def open_db(path: Path | str | None = None) -> None:
         Path(path).chmod(0o600)  # personal data at rest (section 22.4)
 
 
+def env_key_imported(mark: bool = False) -> bool:
+    """SQLite's user_version is 1 after the one-time import of the .env key (auth.import_env_key)."""
+    if mark:
+        _q("PRAGMA user_version = 1")
+    return _q("PRAGMA user_version").fetchone()[0] == 1
+
+
 def now(offset_seconds: float = 0) -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
 

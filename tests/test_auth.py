@@ -108,6 +108,9 @@ def test_env_key_import(monkeypatch):
     assert len(store.keys()) == 1  # conftest imported "k" * 40
     auth.import_env_key()
     assert len(store.keys()) == 1  # not again once the table has keys
+    store.delete_key(store.keys()[0]["id"])
+    auth.import_env_key()
+    assert store.keys() == []  # a deleted key does not come back at the next start
     store.open_db(":memory:")
     monkeypatch.delenv("CALLENVOY_API_KEY")
     auth.import_env_key()
@@ -248,3 +251,9 @@ def test_recording_range_and_cache(client, monkeypatch, tmp_path):
     store.update_call(v["id"], recording_sid="RE" + "b" * 32)
     assert client.get(url).status_code == 502
     assert list(config.RECORDINGS_DIR.iterdir()) == [config.RECORDINGS_DIR / f"RE{'a' * 32}.mp3"]  # no .part left
+
+
+def test_agent_key_cannot_get_an_audio_ticket(client):
+    """The ticket opens the owner's live audio: an agent key must not get one."""
+    r = client.post("/callenvoy/api/calls/c_x/audio-ticket", headers={"Authorization": "Bearer " + "k" * 40})
+    assert r.status_code == 403 and r.json()["code"] == "owner_only"

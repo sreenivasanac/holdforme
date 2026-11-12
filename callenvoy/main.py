@@ -133,7 +133,8 @@ class AuthMiddleware:
                         raise auth.AuthError("session_expired", "the session has ended; sign in again")
             elif path not in PUBLIC_API:
                 auth.check_key(key)
-                if path.startswith(OWNER_ONLY):
+                # The audio ticket lets its holder hear and speak on a live call: the owner only.
+                if path.startswith(OWNER_ONLY) or path.endswith("/audio-ticket"):
                     raise auth.AuthError("owner_only", "agent keys cannot use this; sign in to the console", 403)
         except auth.AuthError as e:
             return await JSONResponse({"error": str(e), "code": e.code}, status_code=e.status)(scope, receive, send)
@@ -423,6 +424,8 @@ async def recording_file(sid: str):
                 with open(os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as f:
                     async for chunk in twilio_api.fetch_recording(sid):
                         f.write(chunk)
+                if not part.stat().st_size:  # never keep an empty file: the next request must try again
+                    raise twilio_api.TwilioError("empty recording")
                 part.rename(path)
             finally:
                 part.unlink(missing_ok=True)
