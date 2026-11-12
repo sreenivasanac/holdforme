@@ -1,6 +1,7 @@
 // Small shared UI parts. All values come from theme.ts.
-import { type ReactNode, useId } from 'react';
+import { type ReactNode, useId, useState } from 'react';
 import {
+  Clipboard,
   Modal,
   Pressable,
   ScrollView,
@@ -22,14 +23,22 @@ import { border, color, disabledOpacity, font, gateWidth, lineHeight, maxContent
 // react-native-web also reports hover and focus in the Pressable state.
 type PressState = PressableStateCallbackType & { hovered?: boolean };
 
-/** Scrolling page body: centred column, max 1000 px. */
-export function Screen({ children }: { children: ReactNode }) {
+/** Scrolling page body: centred column, max 1000 px. `footer` stays below the scrolling part (always in view). */
+export function Screen({ children, footer }: { children: ReactNode; footer?: ReactNode }) {
   const wide = useWide();
-  return (
+  const body = (
     <ScrollView style={s.fill} contentContainerStyle={[s.main, wide && s.mainWide]}>
       <AlertBanner />
       {children}
     </ScrollView>
+  );
+  return footer ? (
+    <View style={s.fill}>
+      {body}
+      {footer}
+    </View>
+  ) : (
+    body
   );
 }
 
@@ -42,9 +51,9 @@ export function Gate({ children }: { children: ReactNode }) {
   );
 }
 
-export function Card({ children, style, label }: { children: ReactNode; style?: StyleProp<ViewStyle>; label?: string }) {
+export function Card({ children, style, label, id }: { children: ReactNode; style?: StyleProp<ViewStyle>; label?: string; id?: string }) {
   return (
-    <View style={[s.card, style]} role={label ? 'region' : undefined} aria-label={label}>
+    <View nativeID={id} style={[s.card, style]} role={label ? 'region' : undefined} aria-label={label}>
       {children}
     </View>
   );
@@ -124,7 +133,7 @@ export function Button({
       onPress={off ? undefined : onPress}
       role="button"
       aria-label={a11yLabel}
-      aria-disabled={off}
+      disabled={disabled} // react-native-web sets aria-disabled from this (busy keeps focus: no disabled)
       aria-busy={busy}
       aria-pressed={pressed}
       aria-expanded={expanded}
@@ -303,6 +312,75 @@ export function Segmented<V extends string>({
   );
 }
 
+/** A row of pill choices that wraps (filters, client tabs), as a radio group. */
+export function Chips<V extends string>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: V;
+  options: readonly (readonly [V, string])[];
+  onChange: (v: V) => void;
+}) {
+  return (
+    <View role="radiogroup" aria-label={label} style={s.chips}>
+      {options.map(([v, t]) => {
+        const on = v === value;
+        return (
+          <Pressable
+            key={v}
+            role="radio"
+            aria-checked={on}
+            onPress={() => onChange(v)}
+            style={(st: PressState) => [s.chip, on && s.segOn, !on && st.hovered && s.segHover]}
+          >
+            <Text style={[s.chipText, on && s.segTextOn]}>{t}</Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
+/** "▸ Title" link that shows its content when opened. Pass `open`/`onToggle` to control it from outside. */
+export function Disclosure({ title, children, open, onToggle }: { title: string; children: ReactNode; open?: boolean; onToggle?: () => void }) {
+  const [own, setOwn] = useState(false);
+  const isOpen = open ?? own;
+  return (
+    <View>
+      <Button label={`${isOpen ? '▾' : '▸'} ${title}`} kind="link" expanded={isOpen} onPress={onToggle ?? (() => setOwn(!own))} />
+      {isOpen ? children : null}
+    </View>
+  );
+}
+
+/** A code block with a Copy button. */
+export function CopyBlock({ code, name }: { code: string; name: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <View style={s.block}>
+      <Text style={[text.mono, s.blockText]} selectable>
+        {code}
+      </Text>
+      <View style={s.copy}>
+        <Button
+          label={copied ? 'Copied' : 'Copy'}
+          a11yLabel={`Copy ${name}`}
+          kind="secondary"
+          size="small"
+          onPress={() => {
+            Clipboard.setString(code);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+          }}
+        />
+      </View>
+    </View>
+  );
+}
+
 /** On/off setting with a title and a short line of help. */
 export function SwitchRow({
   title,
@@ -450,6 +528,12 @@ const s = StyleSheet.create({
   segBtn: { flex: 1, paddingVertical: space.seg, paddingHorizontal: space.m, borderRadius: radius.s, alignItems: 'center', justifyContent: 'center' },
   segOn: { backgroundColor: color.selected, borderWidth: border.thin, borderColor: color.brand },
   segHover: { backgroundColor: color.card },
+  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: space.s },
+  chip: { paddingVertical: space.s, paddingHorizontal: space.ml, borderRadius: radius.pill, borderWidth: border.thin, borderColor: color.line, backgroundColor: color.card2 },
+  chipText: { color: color.muted, fontSize: font.size.m, fontWeight: font.weight.semi },
+  block: { backgroundColor: color.bg, borderWidth: border.thin, borderColor: color.line, borderRadius: radius.m, paddingVertical: space.m, paddingHorizontal: space.ml, paddingRight: space.x5 + space.x3 + space.xs },
+  blockText: { lineHeight: font.size.s * font.monoLineHeight },
+  copy: { position: 'absolute', top: space.s, right: space.s },
   segText: { color: color.muted, fontSize: font.size.body, fontWeight: font.weight.semi, textAlign: 'center' },
   segTextOn: { color: color.white },
   lineRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space.l, paddingVertical: space.ml, borderTopWidth: border.thin, borderTopColor: color.line },

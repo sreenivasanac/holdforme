@@ -1,5 +1,5 @@
 // Display text for calls: labels, numbers, times. Pure functions.
-import type { Call } from './api';
+import type { Call, Line } from './api';
 
 export function phone(n: string) {
   const m = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(n);
@@ -115,4 +115,45 @@ export function toE164(input: string): string | null {
   if (d.length === 11 && d.startsWith('1')) d = d.slice(1);
   const e = `+1${d}`;
   return /^\+1[2-9]\d{2}[2-9]\d{6}$/.test(e) ? e : null;
+}
+
+/** "just now", "5 min ago", "3 h ago", "2 days ago". */
+export function ago(iso: string, now = Date.now()) {
+  const min = Math.floor((now - Date.parse(iso)) / 60000);
+  if (min < 1) return 'just now';
+  if (min < 60) return `${min} min ago`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h} h ago`;
+  const d = Math.floor(h / 24);
+  return `${d} day${d === 1 ? '' : 's'} ago`;
+}
+
+/** Lines of one speaker this close together (seconds) show as one bubble. */
+export const MERGE_GAP_SECONDS = 10;
+
+const seconds = (l: Line) => Date.parse(l.t) / 1000;
+
+/** Joins consecutive fragments of the same speaker that are close in time. The first fragment's n, t and `at` are kept. */
+export function mergeLines(lines: Line[], gap = MERGE_GAP_SECONDS): Line[] {
+  const out: Line[] = [];
+  let prev: Line | null = null; // the last fragment taken in, for the time gap
+  for (const l of lines) {
+    const last = out[out.length - 1];
+    if (last && prev && l.who !== 'event' && l.who === last.who && Math.abs(seconds(l) - seconds(prev)) <= gap) {
+      out[out.length - 1] = { ...last, text: `${last.text} ${l.text}` };
+    } else {
+      out.push(l);
+    }
+    prev = l;
+  }
+  return out;
+}
+
+/** Index of the line that plays at `time` (the last one that started), or -1. */
+export function lineAt(lines: Line[], time: number) {
+  let found = -1;
+  lines.forEach((l, i) => {
+    if (l.who !== 'event' && l.at != null && l.at <= time) found = i;
+  });
+  return found;
 }

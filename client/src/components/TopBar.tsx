@@ -1,19 +1,16 @@
 import { usePathname } from 'expo-router';
-import { useState } from 'react';
 import { Pressable, StyleSheet, Text, View, type PressableStateCallbackType } from 'react-native';
-import { useCalls, useGo, useSession } from '../hooks';
+import { useGo } from '../hooks';
 import { border, color, font, radius, space, useWide } from '../theme';
-import { Button, Sheet, T, text } from './ui';
+import { Button, text } from './ui';
 
-/** App name, screen links and Sign out (asks first when a call is live). */
+/** App name, screen links and New call. */
 export function TopBar() {
   const wide = useWide();
   const path = usePathname();
-  const signOut = useSignOut();
-
   const go = useGo();
   const nav = (href: string, label: string) => {
-    const on = href === '/' ? path === '/' || path.startsWith('/calls') || path === '/new' : path.startsWith(href);
+    const on = href === '/' ? path === '/' || path.startsWith('/calls') : path.startsWith(href);
     return (
       <Pressable
         role="link"
@@ -30,56 +27,37 @@ export function TopBar() {
 
   return (
     <View style={[s.bar, wide && s.barWide]} role="banner">
-      <Text style={[text.brand, !wide && s.brandNarrow]}>CallEnvoy</Text>
+      <Text style={[text.brand, s.brand, !wide && s.brandNarrow]} numberOfLines={1}>
+        CallEnvoy
+      </Text>
       <View style={[s.nav, wide && s.navWide]} role="navigation" aria-label="Console">
         {nav('/', 'Calls')}
+        {nav('/agents', 'Agents')}
         {nav('/settings', 'Settings')}
-        {nav('/connect', 'Connect')}
-        <Pressable role="button" onPress={signOut.request} style={[s.link, wide && s.linkWide]}>
-          {(st: PressableStateCallbackType & { hovered?: boolean }) => (
-            <Text style={[s.linkText, !wide && s.linkTextNarrow, st.hovered && s.linkTextOn]}>Sign out</Text>
-          )}
-        </Pressable>
       </View>
-      {signOut.sheet}
+      <View>
+        <Button label="New call" size="small" onPress={() => go('/new')} />
+      </View>
     </View>
   );
-}
-
-/** Sign out, asking first when a call is live. Returns the action and its confirmation sheet. */
-export function useSignOut() {
-  const { signOut } = useSession();
-  const { calls } = useCalls();
-  const [confirm, setConfirm] = useState(false);
-  const live = calls?.some((c) => !c.finished);
-  return {
-    request: () => (live ? setConfirm(true) : signOut()),
-    sheet: (
-      <Sheet title="Sign out while a call is live?" visible={confirm} onClose={() => setConfirm(false)}>
-        <T v="soft">The call goes on. You will not get alerts in this browser until you sign in again.</T>
-        <Button label="Sign out" kind="danger" full onPress={signOut} />
-        <Button label="Stay signed in" kind="secondary" full onPress={() => setConfirm(false)} />
-      </Sheet>
-    ),
-  };
 }
 
 const s = StyleSheet.create({
   bar: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: space.ml,
+    gap: space.sm,
     padding: space.ml,
     borderBottomWidth: border.thin,
     borderBottomColor: color.line,
     backgroundColor: color.topbar,
   },
-  barWide: { paddingVertical: space.l, paddingHorizontal: space.x4 },
+  barWide: { paddingVertical: space.l, paddingHorizontal: space.x4, gap: space.ml },
+  brand: { flexShrink: 1, minWidth: 0 }, // on the smallest phones the name is cut, not the links
   brandNarrow: { fontSize: font.size.body },
-  nav: { flexDirection: 'row', alignItems: 'center' },
-  navWide: { gap: space.xs },
-  link: { paddingVertical: space.sm, paddingHorizontal: space.m, borderRadius: radius.m },
+  nav: { flexDirection: 'row', alignItems: 'center', flexGrow: 1 },
+  navWide: { gap: space.xs, justifyContent: 'flex-end' },
+  link: { paddingVertical: space.sm, paddingHorizontal: space.sm, borderRadius: radius.m },
   linkWide: { paddingHorizontal: space.ml },
   on: { backgroundColor: color.selected },
   linkText: { color: color.muted, fontWeight: font.weight.semi, fontSize: font.size.base },

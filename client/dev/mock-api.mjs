@@ -1,6 +1,11 @@
-// Dev-only mock of the CallEnvoy console API (plan sections 4, 4a, 10a, 22) with sample calls.
+// Dev-only mock of the CallEnvoy console API (plan sections 4, 4a, 10a, 22; round 2 A1-A4) with sample calls.
 // Not part of the export. Serves client/dist under /callenvoy too, so the real export can be checked.
-//   node dev/mock-api.mjs            -> http://localhost:3020/callenvoy/   (API key: dev-key)
+//   node dev/mock-api.mjs            -> http://localhost:3020/callenvoy/   (owner email: dana@example.com, agent key: dev-key)
+//   GET  /__mock/signin                 signs this browser in (sets the session cookie) and opens the console
+//   GET  /__mock/last-link              the last emailed sign-in link (also printed on the console)
+//   POST /__mock/mail?ready=0|1         email sign-in configured or not (GET /api/auth/me mail_ready)
+//   POST /__mock/expire                 ends every session (the next request gets 401 session_expired)
+//   POST /__mock/recording?fail=1|0     /r/demo answers 404 (to see the player's error state)
 //   POST /__mock/calls?set=empty|many  switches the call list
 //   POST /__mock/socket?id=<call>&send=replaced|error|drop   acts on that call's open audio socket
 //   POST /__mock/alert?id=<call>&state=alerting|none&seconds=20   starts or ends an alert (a new alert_until each time)
@@ -11,8 +16,9 @@ import http from 'node:http';
 import path from 'node:path';
 
 const PORT = Number(process.env.PORT ?? 3020);
-const KEY = 'dev-key';
 const DIST = path.resolve(import.meta.dirname, '../dist');
+const VOICE_DIR = path.resolve(import.meta.dirname, '../../callenvoy/static/voices');
+const OWNER_EMAIL = 'dana@example.com';
 const iso = (msAgo) => new Date(Date.now() - msAgo).toISOString();
 const MIN = 60_000;
 
@@ -45,7 +51,13 @@ const TEXT_LIMITS = { name: 80, details: 3000, name_pronunciation: 80, assistant
 const RANGES = { max_minutes: [1, 120], alert_wait_seconds: [5, 120], phone_ring_seconds: [10, 60] };
 let verifiedAt = 0; // caller ID: verified 10 s after Verify
 
-const line = (n, sAgo, who, text) => ({ n, t: iso(sAgo * 1000), who, text });
+const line = (n, sAgo, who, text) => ({ n, t: iso(sAgo * 1000), who, text, at: null });
+// The demo recording: the voice samples (CBR 128 kb/s mp3 frames) one after the other, twice: about 2 minutes.
+const voiceFiles = fs.existsSync(VOICE_DIR) ? fs.readdirSync(VOICE_DIR).filter((f) => f.endsWith('.mp3')).sort() : [];
+const one = Buffer.concat(voiceFiles.map((f) => fs.readFileSync(path.join(VOICE_DIR, f))));
+const RECORDING = Buffer.concat([one, one]);
+const RECORDING_SECONDS = Math.round((RECORDING.length * 8) / 128000) || 120;
+let recordingFails = false;
 const holdLines = (s) => [
   line(0, s, 'event', 'Dialing +1 (656) 240-5137'),
   line(1, s - 4, 'them', 'Thank you for calling Northstar Internet. For billing, press 1. For technical support, press 2.'),
@@ -53,6 +65,32 @@ const holdLines = (s) => [
   line(3, s - 19, 'them', 'All of our agents are busy. Your call is important to us. Please continue to hold.'),
   line(4, s - 20, 'event', 'waiting on hold'),
 ];
+// A finished call with `at` (seconds into the recording). Fragments of one speaker close together show as one bubble.
+const doneLines = (createdAgo) => [
+  [null, 'event', 'Dialing +1 (656) 240-5137'],
+  [0.8, 'them', 'Thank you for calling Northstar Internet.'],
+  [3.1, 'them', 'For billing, press 1. For technical support, press 2.'],
+  [6.0, 'event', 'pressed 1'],
+  [9.5, 'them', 'All of our agents are busy. Please continue to hold.'],
+  [12.0, 'event', 'waiting on hold'],
+  [24.2, 'them', 'Hi, thanks for holding, this is Maria in billing. How can I help?'],
+  [29.0, 'ai', 'Hi Maria, I am calling on behalf of Dana Reyes about her bill.'],
+  [33.4, 'ai', 'It went from 65 to 130 dollars after a plan change she did not ask for.'],
+  [40.6, 'them', 'I see that. What is the service address on the account?'],
+  [45.2, 'ai', 'One moment, let me check that.'],
+  [47.0, 'event', 'asked owner: What is the service address on the account?'],
+  [58.7, 'ai', 'It is 1820 SE Alder St, Apartment 4, Portland, Oregon.'],
+  [66.3, 'them', 'Thank you. I moved the account back to the old plan.'],
+  [70.1, 'them', 'And I added a 65 dollar credit. It shows on the next bill.'],
+  [null, 'ai', 'Thank you. Could I have a reference number?'], // start not known: not clickable
+  [88.4, 'them', 'Sure, it is N S 4 8 2 1 3 K.'],
+  [97.9, 'ai', 'N S 4 8 2 1 3 K. Thanks so much, Maria. Goodbye.'],
+  [104.5, 'them', 'Goodbye, have a nice day.'],
+  [110.0, 'event', 'call ended by AI'],
+].map(([at, who, text], n, all) => {
+  const sec = at ?? (n ? all[n - 1][0] + 8 : 0); // a line without `at` still has a time
+  return { n, t: new Date(Date.now() - createdAgo + (6 + sec) * 1000).toISOString(), who, text, at: who === 'event' ? null : at };
+});
 const base = (id, over) => ({
   id, direction: 'outbound', status: 'in_progress', phase: 'talking', finished: false, business: 'Northstar Internet', number: '+16562405137',
   goal: 'My bill went from $65 to $130 after a plan change I did not ask for. Get the plan change reversed and the extra charge credited. Ask for a reference number.',
@@ -75,11 +113,11 @@ function sampleCalls() {
     base('c_phone', { business: 'Bayview Dental', number: '+14155550126', phase: 'owner_on_call', created_at: iso(6 * MIN),
       owner: { state: 'on_call', via: 'phone', alert_until: null, unreachable: false },
       transcript: [...holdLines(350), line(5, 30, 'event', 'owner took the call'), line(6, 20, 'owner', 'Hi, this is Dana. I would like to move my cleaning to next week.')] }),
-    base('c_done', { status: 'completed', phase: null, finished: true, created_at: iso(60 * MIN), ended_at: iso(47 * MIN), talk_seconds: 796,
+    base('c_done', { status: 'completed', phase: null, finished: true, created_at: iso(60 * MIN), ended_at: iso(60 * MIN - (RECORDING_SECONDS + 6) * 1000), talk_seconds: RECORDING_SECONDS,
       outcome: { result: 'done', summary: 'Maria in billing moved the account back to the old plan and added a $65 credit, which shows on the next bill.', details: { reference_number: 'NS48213K', credit: '$65.00, next bill' } },
       answered_questions: [{ id: 'q_0', question: 'What is the service address on the account?', answer: '1820 SE Alder St, Apt 4, Portland OR 97214' }],
-      recordings: [{ url: '/callenvoy/r/demo', duration_seconds: 796 }],
-      transcript: [...holdLines(3600), line(5, 2900, 'ai', 'N S 4 8 2 1 3 K. Thanks so much, Maria. Goodbye.'), line(6, 2890, 'event', 'call ended by AI')] }),
+      recordings: [{ url: '/callenvoy/r/demo', duration_seconds: RECORDING_SECONDS }],
+      transcript: doneLines(60 * MIN) }),
     base('c_handed', { business: 'City Water Billing', number: '+19715550110', status: 'completed', phase: null, finished: true, recorded: false,
       created_at: iso(26 * 60 * MIN), ended_at: iso(26 * 60 * MIN - 756_000), talk_seconds: 756, owner_seconds: 44,
       outcome: { result: 'handed_to_owner', summary: 'You took over after the AI gave the account number. The account was moved back to the old plan.', details: {} },
@@ -117,17 +155,139 @@ function live(c) {
 }
 
 const send = (res, status, body) => {
-  res.writeHead(status, { 'content-type': 'application/json', 'access-control-allow-origin': 'http://localhost:8081', 'access-control-allow-headers': 'authorization, content-type', 'access-control-allow-methods': 'GET, POST, PUT, DELETE' });
+  res.writeHead(status, { 'content-type': 'application/json', 'access-control-allow-origin': 'http://localhost:8081', 'access-control-allow-headers': 'authorization, content-type', 'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE' });
   res.end(body === undefined ? '' : JSON.stringify(body));
 };
 const readBody = (req) => new Promise((ok) => { let d = ''; req.on('data', (c) => (d += c)); req.on('end', () => { try { ok(JSON.parse(d || '{}')); } catch { ok({}); } }); });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const cookie = (req, name) => (req.headers.cookie ?? '').split(/;\s*/).find((c) => c.startsWith(`${name}=`))?.slice(name.length + 1) ?? null;
+const sessions = new Set(); // session ids (the server stores them hashed)
+const linkTokens = new Map(); // token -> expiry ms (one use)
+const linkRequests = []; // times of POST /api/auth/request, for the 5 per hour limit
+let mailReady = true;
+let lastLink = null;
+const newSession = (res) => {
+  const sid = crypto.randomBytes(24).toString('hex');
+  sessions.add(sid);
+  res.setHeader('set-cookie', `ce_session=${sid}; HttpOnly; SameSite=Strict; Path=/callenvoy; Max-Age=${30 * 86400}`);
+};
+const ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz'; // no look-alike characters
+const newKey = () => 'ce_live_' + Array.from(crypto.randomBytes(32), (b) => ALPHABET[b % ALPHABET.length]).join('');
+const keys = [
+  { id: 'k_env', name: 'First key (.env)', key: 'dev-key', prefix: 'dev-key', created_at: iso(30 * 24 * 60 * MIN), last_used_at: iso(2 * 24 * 60 * MIN), disabled: false },
+  { id: 'k_old', name: 'Old laptop, Claude Desktop with a long name', key: newKey(), created_at: iso(9 * 24 * 60 * MIN), last_used_at: null, disabled: true },
+].map((k) => ({ ...k, prefix: k.key.slice(0, 12) }));
+const keyView = ({ key, ...k }) => k;
+/** 'owner', 'agent', or the 401 code. */
+function credential(req) {
+  const sid = cookie(req, 'ce_session');
+  if (sid && sessions.has(sid)) return 'owner';
+  const h = req.headers.authorization;
+  if (!h) return sid ? 'session_expired' : 'no_credential';
+  const k = keys.find((x) => x.key === h.replace(/^(Bearer\s+)+/i, '').trim());
+  if (!k) return 'bad_key';
+  if (k.disabled) return 'key_disabled';
+  if (!k.last_used_at || Date.now() - Date.parse(k.last_used_at) > MIN) k.last_used_at = iso(0); // at most once a minute
+  return 'agent';
+}
+const ERRORS = { no_credential: 'Sign in or send an API key.', session_expired: 'Your session has ended. Sign in again.', bad_key: 'Unknown API key.', key_disabled: 'This API key is disabled.' };
+
+async function auth(req, res, p) {
+  if (p === '/api/auth/me') {
+    const sid = cookie(req, 'ce_session');
+    return send(res, 200, { signed_in: !!sid && sessions.has(sid), email: sid && sessions.has(sid) ? OWNER_EMAIL : null, mail_ready: mailReady });
+  }
+  if (p === '/api/auth/request' && req.method === 'POST') {
+    const b = await readBody(req);
+    const hour = Date.now() - 60 * MIN;
+    while (linkRequests.length && linkRequests[0] < hour) linkRequests.shift();
+    if (linkRequests.length >= 5) return send(res, 429, { error: 'Too many sign-in requests. Try again in an hour.', code: 'rate_limited' });
+    linkRequests.push(Date.now());
+    if (mailReady && String(b.email ?? '').toLowerCase() === OWNER_EMAIL) {
+      const t = crypto.randomBytes(24).toString('hex');
+      linkTokens.set(t, Date.now() + 15 * MIN);
+      lastLink = `http://localhost:${PORT}/callenvoy/signin?token=${t}`;
+      console.log(`sign-in link for ${OWNER_EMAIL}: ${lastLink}`);
+    }
+    return send(res, 200, { ok: true });
+  }
+  if (p === '/api/auth/verify' && req.method === 'POST') {
+    const { token } = await readBody(req);
+    const until = linkTokens.get(token);
+    linkTokens.delete(token);
+    if (!until || until < Date.now()) return send(res, 400, { error: 'This sign-in link was used or has expired.', code: 'bad_link' });
+    newSession(res);
+    return send(res, 200, { ok: true, email: OWNER_EMAIL });
+  }
+  if (p === '/api/auth/sign-out' && req.method === 'POST') {
+    sessions.delete(cookie(req, 'ce_session'));
+    res.setHeader('set-cookie', 'ce_session=; HttpOnly; SameSite=Strict; Path=/callenvoy; Max-Age=0');
+    return send(res, 200, { ok: true });
+  }
+  return send(res, 404, { detail: 'Not found' });
+}
+
+async function keyRoutes(req, res, p) {
+  const m = req.method;
+  if (p === '/api/keys' && m === 'GET') return send(res, 200, { keys: keys.map(keyView) });
+  if (p === '/api/keys' && m === 'POST') {
+    const name = String((await readBody(req)).name ?? '').trim();
+    if (!name || name.length > 40) return send(res, 400, { detail: 'The name must be 1-40 characters.', field: 'name' });
+    if (keys.length >= 20) return send(res, 409, { detail: 'At most 20 keys. Delete one first.' });
+    const key = newKey();
+    const k = { id: `k_${crypto.randomBytes(4).toString('hex')}`, name, key, prefix: key.slice(0, 12), created_at: iso(0), last_used_at: null, disabled: false };
+    keys.push(k);
+    return send(res, 201, { ...keyView(k), key });
+  }
+  const k = keys.find((x) => x.id === p.split('/')[3]);
+  if (!k) return send(res, 404, { detail: 'No key with that id.' });
+  if (m === 'PATCH') {
+    const b = await readBody(req);
+    if (typeof b.disabled === 'boolean') k.disabled = b.disabled;
+    if (typeof b.name === 'string' && b.name.trim()) k.name = b.name.trim().slice(0, 40);
+    return send(res, 200, keyView(k));
+  }
+  if (m === 'DELETE') {
+    keys.splice(keys.indexOf(k), 1);
+    return send(res, 204);
+  }
+  return send(res, 404, { detail: 'Not found' });
+}
+
+/** /r/demo with Range support (206, Accept-Ranges, Content-Range), as the server serves the cached mp3. */
+function recording(req, res) {
+  if (recordingFails || !RECORDING.length) return send(res, 404, { detail: 'No such recording.' });
+  const size = RECORDING.length;
+  const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range ?? '');
+  const head = { 'content-type': 'audio/mpeg', 'accept-ranges': 'bytes' };
+  if (!m) {
+    res.writeHead(200, { ...head, 'content-length': size });
+    return res.end(RECORDING);
+  }
+  let start = m[1] ? Number(m[1]) : size - Number(m[2]);
+  let end = m[1] && m[2] ? Number(m[2]) : size - 1;
+  end = Math.min(end, size - 1);
+  if (start > end || start < 0) {
+    res.writeHead(416, { 'content-range': `bytes */${size}` });
+    return res.end();
+  }
+  res.writeHead(206, { ...head, 'content-length': end - start + 1, 'content-range': `bytes ${start}-${end}/${size}` });
+  res.end(RECORDING.subarray(start, end + 1));
+}
+
 const tickets = new Set();
 const sockets = new Map(); // call id -> the open audio socket
 const counts = {}; // call id -> GET /api/calls/<id> requests
 
 async function api(req, res, p, q) {
-  if (req.headers.authorization !== `Bearer ${KEY}`) return send(res, 401, { detail: 'Unauthorized' });
+  if (p.startsWith('/api/auth/')) return auth(req, res, p);
+  const who = credential(req);
+  if (who !== 'owner' && who !== 'agent') return send(res, 401, { error: ERRORS[who], code: who });
+  const ownerOnly = p.startsWith('/api/keys') || p.startsWith('/api/push/');
+  if (who === 'agent' && ownerOnly) return send(res, 401, { error: 'This needs the owner sign-in; an API key is not enough.', code: 'no_credential' });
+  const origin = req.headers.origin;
+  if (who === 'owner' && req.method !== 'GET' && origin && origin !== `http://localhost:${PORT}`) return send(res, 403, { detail: 'Wrong origin.' });
+  if (p.startsWith('/api/keys')) return keyRoutes(req, res, p);
   const m = req.method;
   if (p === '/api/config') return send(res, 200, { app_name: 'CallEnvoy', mcp_url: 'https://pragnyalabs.com/callenvoy/mcp', voices: VOICES,
     limits: { max_call_minutes: 120, max_concurrent_calls: 2, daily_minute_cap: 240, minutes_used_today: 34 },
@@ -248,12 +408,28 @@ const server = http.createServer(async (req, res) => {
     c.owner = { state: on ? 'alerting' : 'none', via: on ? 'app' : null, alert_until: null, unreachable: false };
     return send(res, 200, { ok: true });
   }
+  if (url.pathname === '/__mock/signin') {
+    newSession(res);
+    res.writeHead(302, { location: '/callenvoy/' });
+    return res.end();
+  }
+  if (url.pathname === '/__mock/last-link') return send(res, 200, { url: lastLink });
+  if (url.pathname === '/__mock/mail') { mailReady = url.searchParams.get('ready') !== '0'; return send(res, 200, { mail_ready: mailReady }); }
+  if (url.pathname === '/__mock/expire') { sessions.clear(); return send(res, 200, { ok: true }); }
+  if (url.pathname === '/__mock/recording') { recordingFails = url.searchParams.get('fail') === '1'; return send(res, 200, { fail: recordingFails }); }
   if (url.pathname === '/__mock/count') return send(res, 200, { count: counts[url.searchParams.get('id')] ?? 0 });
   if (url.pathname === '/__mock/calls') { const set = url.searchParams.get('set'); calls = set === 'empty' ? [] : sampleCalls(); return send(res, 200, { calls: calls.length }); }
   if (!url.pathname.startsWith('/callenvoy')) return send(res, 404, { detail: 'Not found' });
   const p = url.pathname.slice('/callenvoy'.length) || '/';
   if (p.startsWith('/api/')) return api(req, res, p, url.searchParams);
-  if (p.startsWith('/static/voices/') || p.startsWith('/r/')) return send(res, 404, { detail: 'No sample audio in the mock.' });
+  if (p === '/r/demo') return recording(req, res);
+  if (p.startsWith('/r/')) return send(res, 404, { detail: 'No such recording.' });
+  if (p.startsWith('/static/voices/')) {
+    const f = path.join(VOICE_DIR, path.basename(p));
+    if (!fs.existsSync(f)) return send(res, 404, { detail: 'No sample.' });
+    res.writeHead(200, { 'content-type': 'audio/mpeg' });
+    return fs.createReadStream(f).pipe(res);
+  }
   let f = path.join(DIST, path.normalize(p));
   if (!f.startsWith(DIST) || !fs.existsSync(f) || fs.statSync(f).isDirectory()) f = path.join(DIST, 'index.html'); // single-page app
   if (!fs.existsSync(f)) return send(res, 503, { detail: 'Run `pnpm --dir client exec expo export --platform web` first.' });
@@ -261,4 +437,4 @@ const server = http.createServer(async (req, res) => {
   fs.createReadStream(f).pipe(res);
 });
 server.on('upgrade', (req, socket) => (req.url.startsWith('/callenvoy/audio/') ? audioSocket(req, socket) : socket.destroy()));
-server.listen(PORT, () => console.log(`mock CallEnvoy on http://localhost:${PORT}/callenvoy/  (key: ${KEY})`));
+server.listen(PORT, () => console.log(`mock CallEnvoy on http://localhost:${PORT}/callenvoy/  (sign in: ${OWNER_EMAIL}, or open /__mock/signin; agent key: dev-key)`));

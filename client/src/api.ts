@@ -12,7 +12,8 @@ export type Mode = 'handle' | 'transfer';
 export type Reach = 'app' | 'phone' | 'app_then_phone';
 export type NoAnswer = 'ai_handles' | 'end_politely';
 
-export type Line = { n: number; t: string; who: 'them' | 'ai' | 'owner' | 'event'; text: string };
+/** `at`: seconds from the start of the recording to the start of the line, or null when not known. */
+export type Line = { n: number; t: string; who: 'them' | 'ai' | 'owner' | 'event'; text: string; at?: number | null };
 export type Question = { id: string; question: string; answer?: string };
 
 export type Call = {
@@ -127,28 +128,30 @@ export type NewCall = {
 };
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number, readonly field?: string) {
+  constructor(message: string, readonly status: number, readonly field?: string, readonly code?: string) {
     super(message);
   }
 }
 
-let apiKey: string | null = null;
+/** An agent key as listed; the full key is only in the answer to createKey. */
+export type ApiKey = { id: string; name: string; prefix: string; created_at: string; last_used_at: string | null; disabled: boolean };
+export type AuthMe = { signed_in: boolean; email: string | null; mail_ready: boolean };
+
 let onUnauthorized: () => void = () => {};
 
-export function setApiKey(key: string | null) {
-  apiKey = key;
-}
 export function setUnauthorizedHandler(fn: () => void) {
   onUnauthorized = fn;
 }
 
+// The console signs in with the session cookie; agents use keys.
 async function request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`${API_BASE}${path}`, {
       method,
       signal,
-      headers: { Authorization: `Bearer ${apiKey ?? ''}`, ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+      credentials: 'same-origin',
+      headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   } catch (e) {
@@ -156,18 +159,20 @@ async function request<T>(method: string, path: string, body?: unknown, signal?:
     throw new ApiError('Cannot reach the CallEnvoy server. Check your connection and try again.', 0);
   }
   const data = await res.json().catch(() => null);
-  if (res.status === 401) {
-    onUnauthorized();
-    throw new ApiError('That key was not accepted. Check it and try again.', 401);
+  if (!res.ok) {
+    const err = toError(res.status, data);
+    if (res.status === 401 && (err.code === 'session_expired' || err.code === 'no_credential')) onUnauthorized();
+    throw err;
   }
-  if (!res.ok) throw toError(res.status, data);
   return data as T;
 }
 
-// The server sends errors as {detail, field?}.
-function toError(status: number, data: { detail?: unknown; field?: string } | null): ApiError {
-  if (typeof data?.detail === 'string') return new ApiError(data.detail, status, data.field);
-  return new ApiError(`The server answered with an error (${status}). Try again.`, status);
+// Errors come as {detail, field?} or, for sign-in and keys, {error, code}.
+function toError(status: number, data: { detail?: unknown; field?: string; error?: unknown; code?: string } | null): ApiError {
+  const msg = typeof data?.detail === 'string' ? data.detail : typeof data?.error === 'string' ? data.error : null;
+  if (status === 401) return new ApiError('You are signed out. Sign in again.', 401, undefined, data?.code);
+  if (msg) return new ApiError(msg, status, data?.field, data?.code);
+  return new ApiError(`The server answered with an error (${status}). Try again.`, status, undefined, data?.code);
 }
 
 export const api = {
@@ -191,5 +196,13 @@ export const api = {
   testPush: () => request<{ sent: number }>('POST', '/api/push/test'),
   callerId: () => request<{ number: string | null; verified: boolean }>('GET', '/api/caller-id'),
   verifyCallerId: () => request<{ validation_code: string | null }>('POST', '/api/caller-id/verify'),
+  me: () => request<AuthMe>('GET', '/api/auth/me'),
+  requestLink: (email: string) => request<{ ok: true }>('POST', '/api/auth/request', { email }),
+  verifyLink: (token: string) => request<{ ok: true; email: string }>('POST', '/api/auth/verify', { token }),
+  signOut: () => request<unknown>('POST', '/api/auth/sign-out'),
+  keys: () => request<{ keys: ApiKey[] }>('GET', '/api/keys'),
+  createKey: (name: string) => request<ApiKey & { key: string }>('POST', '/api/keys', { name }),
+  updateKey: (id: string, patch: { disabled?: boolean; name?: string }) => request<ApiKey>('PATCH', `/api/keys/${encodeURIComponent(id)}`, patch),
+  deleteKey: (id: string) => request<unknown>('DELETE', `/api/keys/${encodeURIComponent(id)}`),
 };
 

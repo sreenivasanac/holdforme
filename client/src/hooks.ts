@@ -1,7 +1,7 @@
-// Shared state: session (API key), calls list, one live call (long-poll), settings.
+// Shared state: session, calls list, one live call (long-poll), settings.
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { api, ApiError, setApiKey, setUnauthorizedHandler, type Call, type Config, type Line, type Settings } from './api';
-import { clearKey, loadKey, saveKey } from './platform/keyStore';
+import { api, ApiError, setUnauthorizedHandler, type AuthMe, type Call, type Config, type Line, type Settings } from './api';
+import { forgetOldKey } from './platform/storage';
 
 const LONG_POLL_SECONDS = 25;
 const LIST_POLL_MS = 3000;
@@ -12,32 +12,40 @@ const LIST_LIMIT = 50;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const message = (e: unknown) => (e instanceof Error ? e.message : 'Something went wrong. Try again.');
 
-// ---- Session ----
+// ---- Session (cookie, checked with GET /api/auth/me) ----
 
-export type Session = { key: string | null; signIn: (key: string) => Promise<void>; signOut: () => void };
-export const SessionContext = createContext<Session>({ key: null, signIn: async () => {}, signOut: () => {} });
+export type Session = {
+  me: AuthMe | null; // null while loading
+  error: string | null;
+  reload: () => Promise<void>;
+  signOut: () => Promise<void>;
+};
+export const SessionContext = createContext<Session>({ me: null, error: null, reload: async () => {}, signOut: async () => {} });
 export const useSession = () => useContext(SessionContext);
 
-/** Creates the session value for the root layout. A 401 anywhere signs out. */
+/** Creates the session value for the root layout. An expired session anywhere shows the sign-in screen. */
 export function useSessionState(): Session {
-  const [key, setKey] = useState<string | null>(() => {
-    const k = loadKey();
-    setApiKey(k);
-    return k;
-  });
-  const signOut = useCallback(() => {
-    clearKey();
-    setApiKey(null);
-    setKey(null);
+  const [me, setMe] = useState<AuthMe | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const reload = useCallback(async () => {
+    setError(null);
+    try {
+      setMe(await api.me());
+    } catch (e) {
+      setError(message(e));
+    }
   }, []);
-  useEffect(() => setUnauthorizedHandler(signOut), [signOut]);
-  const signIn = useCallback(async (k: string) => {
-    setApiKey(k);
-    await api.profile(); // checks the key; throws ApiError on 401
-    saveKey(k);
-    setKey(k);
-  }, []);
-  return { key, signIn, signOut };
+  const out = useCallback(() => setMe((m) => (m ? { ...m, signed_in: false, email: null } : m)), []);
+  useEffect(() => {
+    forgetOldKey();
+    setUnauthorizedHandler(out);
+    void reload();
+  }, [out, reload]);
+  const signOut = useCallback(async () => {
+    await api.signOut().catch(() => {}); // signed out in this tab either way
+    out();
+  }, [out]);
+  return { me, error, reload, signOut };
 }
 
 // ---- Calls list (shared by the alert banner and the Calls screen) ----

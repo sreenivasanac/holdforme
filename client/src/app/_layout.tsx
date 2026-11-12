@@ -1,10 +1,11 @@
-import { router, Slot } from 'expo-router';
+import { router, Slot, usePathname } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import type { Call } from '../api';
-import { KeyGate } from '../components/KeyGate';
+import { Loading } from '../components/Loading';
+import { SignInGate } from '../components/SignIn';
 import { TopBar } from '../components/TopBar';
-import { Button, Sheet, T } from '../components/ui';
+import { Button, Gate, Sheet, T } from '../components/ui';
 import {
   CallsContext,
   LeaveGuardContext,
@@ -20,9 +21,23 @@ import { color } from '../theme';
 
 export default function RootLayout() {
   const session = useSessionState();
+  const path = usePathname();
+  const { me } = session;
   return (
     <SessionContext.Provider value={session}>
-      <View style={s.root}>{session.key ? <Console key={session.key} /> : <KeyGate />}</View>
+      <View style={s.root}>
+        {path === '/signin' ? (
+          <Slot /> // the emailed link's page, signed in or not
+        ) : !me ? (
+          <Gate>
+            <Loading error={session.error} retry={() => void session.reload()} label="Loading" />
+          </Gate>
+        ) : me.signed_in ? (
+          <Console />
+        ) : (
+          <SignInGate />
+        )}
+      </View>
     </SessionContext.Provider>
   );
 }

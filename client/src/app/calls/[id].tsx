@@ -1,14 +1,14 @@
 import { useLocalSearchParams } from 'expo-router';
 import { StyleSheet, View } from 'react-native';
 import { BackLink } from '../../components/BackLink';
-import { AnsweredQuestions, CallHeader, OutcomeCard, QuestionBox, RecordingPlayer, TranscriptLog } from '../../components/CallDetail';
+import { CallHeader, CallRecording, CallRequest, OutcomeCard, QuestionBox, TranscriptLog } from '../../components/CallDetail';
 import { Loading } from '../../components/Loading';
 import { OwnerControls } from '../../components/OwnerControls';
 import { Screen } from '../../components/ui';
 import { useCall, useSettings } from '../../hooks';
 import { space, useWide } from '../../theme';
 
-/** One call: live (transcript, question, owner panel) or finished (outcome, recording). */
+/** One call: live (transcript, question, owner panel) or finished (outcome, recording with transcript, options). */
 export default function CallScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { call, error } = useCall(id);
@@ -23,13 +23,21 @@ export default function CallScreen() {
     );
 
   const inbound = call.direction === 'inbound';
-  const side = call.finished ? (
-    <>
-      <OutcomeCard call={call} />
-      {(call.talk_seconds ?? 0) > 0 && <RecordingPlayer call={call} />}
-      <AnsweredQuestions questions={call.answered_questions} />
-    </>
-  ) : inbound ? null : (
+  if (call.finished)
+    return (
+      <Screen>
+        <BackLink />
+        <CallHeader call={call} />
+        {!inbound && (
+          <>
+            <OutcomeCard call={call} />
+            <CallRecording call={call} />
+            <CallRequest call={call} />
+          </>
+        )}
+      </Screen>
+    );
+  const side = inbound ? null : (
     <>
       {call.open_questions.map((q) => (
         <QuestionBox key={q.id} callId={call.id} q={q} />

@@ -249,6 +249,67 @@ export function playUrl(url: string, onEnd: () => void): () => void {
   return stop;
 }
 
+export type PlayerEvents = {
+  onTime: (t: number) => void;
+  onDuration: (d: number) => void;
+  onPlaying: (on: boolean) => void;
+  onLoading: (on: boolean) => void;
+  onError: () => void;
+};
+export type Player = { play: () => void; pause: () => void; seek: (t: number) => void; close: () => void };
+
+/** A recording that can seek (the server answers Range requests). Loads on first use; after an error the next play loads again. */
+export function openPlayer(url: string, ev: PlayerEvents): Player {
+  let a: HTMLAudioElement | null = null;
+  const pause = () => {
+    a?.pause();
+    if (stopCurrent === pause) stopCurrent = null;
+  };
+  const audio = () => {
+    if (a) return a;
+    const x = new Audio(url);
+    x.preload = 'metadata';
+    x.ontimeupdate = () => ev.onTime(x.currentTime);
+    x.ondurationchange = () => Number.isFinite(x.duration) && ev.onDuration(x.duration);
+    x.onwaiting = () => ev.onLoading(true);
+    x.onplaying = () => {
+      ev.onLoading(false);
+      ev.onPlaying(true);
+    };
+    x.onpause = () => ev.onPlaying(false);
+    x.onerror = () => {
+      a = null;
+      ev.onLoading(false);
+      ev.onPlaying(false);
+      ev.onError();
+    };
+    a = x;
+    return x;
+  };
+  return {
+    play: () => {
+      const x = audio();
+      if (stopCurrent !== pause) stopCurrent?.(); // one sound at a time (voice samples too)
+      stopCurrent = pause;
+      if (x.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) ev.onLoading(true);
+      void x.play().catch(() => ev.onLoading(false)); // a load failure arrives as onerror
+    },
+    pause,
+    seek: (t) => {
+      audio().currentTime = t;
+      ev.onTime(t);
+    },
+    close: () => {
+      pause();
+      if (!a) return;
+      a.onerror = a.onpause = a.ontimeupdate = null; // no events after close
+      a.removeAttribute('src');
+      a.load(); // stops the download
+      a = null;
+    },
+  };
+}
+
 /** While on: the browser asks before the page is closed or reloaded. */
 export function guardLeave(on: boolean): () => void {
   if (!on) return () => {};

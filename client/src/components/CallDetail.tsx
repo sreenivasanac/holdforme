@@ -1,13 +1,16 @@
-// Parts of the call screen: header, transcript, question box, outcome, recording, answered questions.
-import { useRef, useState } from 'react';
-import { Linking, ScrollView, StyleSheet, Text, View, type ScrollViewInstance } from 'react-native';
+// Parts of the call screen: header, transcript (with the recording player when finished), question box, outcome, call options.
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { Pressable, ScrollView, StyleSheet, Text, View, type PressableStateCallbackType, type ScrollViewInstance } from 'react-native';
 import { api, type Call, type Line, type Question } from '../api';
-import { callSeconds, clock, duration, modeLine, phone, RESULT_TEXT, statusLabel, stepIndex, STEPS, when } from '../format';
+import { callSeconds, clock, duration, lineAt, mergeLines, modeLine, phone, RESULT_TEXT, statusLabel, stepIndex, STEPS, when } from '../format';
 import { useNow } from '../hooks';
-import { playUrl } from '../platform/audio';
 import { border, color, font, lineHeight, lineMaxWidth, radius, space, transcriptHeight, useWide } from '../theme';
 import { StatusBadge } from './CallList';
-import { Button, Card, LiveDot, Note, Pill, T, TextField, text } from './ui';
+import { RecordingPlayer, usePlayer, type PlayerControl } from './RecordingPlayer';
+import { Button, Card, Disclosure, LiveDot, Note, Pill, T, TextField, text } from './ui';
+
+const HAND_SCROLL_PAUSE_MS = 5000; // no automatic scrolling this long after the reader scrolled the transcript
+const AUTO_SCROLL_MS = 1000; // scroll events this soon after an automatic scroll are not the reader's
 
 export function CallHeader({ call }: { call: Call }) {
   const wide = useWide();
@@ -25,7 +28,7 @@ export function CallHeader({ call }: { call: Call }) {
           </T>
           <T v="muted">
             {phone(call.number)} · {times}
-            {call.calling_number ? ` · caller ID ${phone(call.calling_number)}` : ''}
+            {call.calling_number && !call.finished ? ` · caller ID ${phone(call.calling_number)}` : ''}
           </T>
         </View>
         <View style={[s.right, !wide && s.rightNarrow]}>
@@ -37,14 +40,14 @@ export function CallHeader({ call }: { call: Call }) {
       </View>
       {inbound ? (
         <Text style={[text.soft, s.goal]}>A business called your CallEnvoy number. The call was forwarded to your phone, so there is no transcript.</Text>
-      ) : (
+      ) : call.finished ? null : (
         <>
           <Text style={[text.soft, s.goal]}>
             <Text style={text.muted}>Goal: </Text>
             {call.goal}
           </Text>
           <Text style={[text.fine, s.mode]}>{modeLine(call)}</Text>
-          {(!call.finished || call.outcome?.result === 'handed_to_owner') && <Progress call={call} />}
+          <Progress call={call} />
         </>
       )}
     </Card>
@@ -65,19 +68,57 @@ function Progress({ call }: { call: Call }) {
   );
 }
 
-/** Transcript; keeps the scroll position unless the reader is at the bottom. */
-export function TranscriptLog({ call }: { call: Call }) {
-  const lines = call.transcript ?? [];
+/** Finished call: the recording player above the transcript, in one card. */
+export function CallRecording({ call }: { call: Call }) {
+  const rec = call.recorded ? call.recordings?.[0] : undefined;
+  if (rec) return <PlayerTranscript call={call} url={rec.url} seconds={rec.duration_seconds} />;
+  const note = !call.recorded ? (
+    <T v="muted">
+      <Text style={s.strong}>Not recorded.</Text> Recording was off for this call.
+    </T>
+  ) : (call.talk_seconds ?? 0) > 0 ? (
+    <T v="muted">The recording is still being processed. It shows here in a minute or two.</T>
+  ) : null;
+  return <TranscriptLog call={call} top={note} />;
+}
+
+function PlayerTranscript({ call, url, seconds }: { call: Call; url: string; seconds: number }) {
+  const player = usePlayer(url, seconds);
+  return <TranscriptLog call={call} title="Recording and transcript" player={player} top={<RecordingPlayer player={player} url={url} />} />;
+}
+
+/**
+ * Transcript. Live: keeps the scroll position unless the reader is at the bottom.
+ * With a player: lines with `at` jump there, and the playing line is highlighted and kept in view.
+ */
+export function TranscriptLog({ call, title, player, top }: { call: Call; title?: string; player?: PlayerControl; top?: ReactNode }) {
+  const lines = useMemo(() => mergeLines(call.transcript ?? []), [call.transcript]);
   const ref = useRef<ScrollViewInstance>(null);
   const atBottom = useRef(true);
+  const boxes = useRef<Record<number, { y: number; h: number }>>({});
+  const view = useRef({ y: 0, h: 0 });
+  const handAt = useRef(0);
+  const autoAt = useRef(0);
   const them = call.business.split(' ')[0];
   const start = Date.parse(call.created_at);
-  const title = call.finished ? 'Transcript' : 'Live transcript';
+  const heading = title ?? (call.finished ? 'Transcript' : 'Live transcript');
+  const current = player ? lineAt(lines, player.time) : -1;
+  const playing = !!player?.playing;
+
+  useEffect(() => {
+    if (!playing || current < 0 || Date.now() - handAt.current < HAND_SCROLL_PAUSE_MS) return;
+    const box = boxes.current[current];
+    const v = view.current;
+    if (!box || (box.y >= v.y && box.y + box.h <= v.y + v.h)) return;
+    autoAt.current = Date.now();
+    ref.current?.scrollTo({ y: Math.max(0, box.y - space.ml), animated: true });
+  }, [current, playing]);
+
   return (
-    <Card label={title}>
+    <Card label={heading}>
       <View style={s.cardHead}>
         <T v="h2" style={s.h2}>
-          {title}
+          {heading}
         </T>
         {call.finished ? (
           <T v="fine">{`${lines.length} line${lines.length === 1 ? '' : 's'}`}</T>
@@ -88,46 +129,70 @@ export function TranscriptLog({ call }: { call: Call }) {
           </View>
         )}
       </View>
+      {top ? <View style={s.top}>{top}</View> : null}
       <ScrollView
         ref={ref}
         style={s.lines}
         contentContainerStyle={s.linesInner}
         role="log"
-        aria-live="polite"
-        aria-label={title}
+        aria-live={call.finished ? undefined : 'polite'}
+        aria-label={call.finished ? 'Transcript' : heading}
         scrollEventThrottle={100}
+        onLayout={(e) => (view.current.h = e.nativeEvent.layout.height)}
         onScroll={(e) => {
           const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+          view.current = { y: contentOffset.y, h: layoutMeasurement.height };
           atBottom.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - space.x3;
+          if (Date.now() - autoAt.current > AUTO_SCROLL_MS) handAt.current = Date.now();
         }}
-        onContentSizeChange={() => atBottom.current && ref.current?.scrollToEnd({ animated: false })}
+        onContentSizeChange={() => !call.finished && atBottom.current && ref.current?.scrollToEnd({ animated: false })}
       >
         {lines.length === 0 ? (
           <Text style={[s.event, s.eventText]}>{call.finished ? 'No transcript for this call.' : 'Nothing said yet. Lines show here as the call goes on.'}</Text>
         ) : (
-          lines.map((l) => <LineView key={l.n} line={l} them={them} start={start} />)
+          lines.map((l, i) => (
+            <View key={l.n} onLayout={(e) => (boxes.current[i] = { y: e.nativeEvent.layout.y, h: e.nativeEvent.layout.height })}>
+              <LineView line={l} them={them} start={start} now={i === current} onJump={player && l.at != null ? () => player.seek(l.at!, true) : undefined} />
+            </View>
+          ))
         )}
       </ScrollView>
     </Card>
   );
 }
 
-function LineView({ line, them, start }: { line: Line; them: string; start: number }) {
+function LineView({ line, them, start, now, onJump }: { line: Line; them: string; start: number; now: boolean; onJump?: () => void }) {
   if (line.who === 'event')
     return (
       <View style={s.event}>
         <Text style={s.eventText}>{line.text}</Text>
       </View>
     );
-  const at = Date.parse(line.t);
-  return (
-    <View style={[s.line, line.who === 'ai' && s.lineAi, line.who === 'owner' && s.lineOwner]}>
+  const who = line.who === 'them' ? them : line.who === 'ai' ? 'AI' : 'You';
+  const t = Date.parse(line.t);
+  // Time from the start of the recording when known, else from the start of the call.
+  const at = line.at != null ? duration(line.at) : Number.isNaN(t) ? null : duration((t - start) / 1000);
+  const bubble = [s.line, line.who === 'ai' && s.lineAi, line.who === 'owner' && s.lineOwner];
+  const body = (
+    <>
       <Text style={s.who}>
-        {line.who === 'them' ? them : line.who === 'ai' ? 'AI' : 'You'}
-        {Number.isNaN(at) ? null : <Text style={s.whoTime}>{'  ' + duration((at - start) / 1000)}</Text>}
+        {who}
+        {at ? <Text style={s.whoTime}>{'  ' + at}</Text> : null}
       </Text>
       <Text style={text.base}>{line.text}</Text>
-    </View>
+    </>
+  );
+  if (!onJump) return <View style={[bubble, now && s.lineNow]}>{body}</View>;
+  return (
+    <Pressable
+      role="button"
+      aria-label={`Jump to ${at}. ${who}: ${line.text}`}
+      aria-current={now ? 'true' : undefined}
+      onPress={onJump}
+      style={(st: PressableStateCallbackType & { hovered?: boolean }) => [bubble, s.lineJump, st.hovered && s.lineHover, now && s.lineNow]}
+    >
+      {body}
+    </Pressable>
   );
 }
 
@@ -185,56 +250,40 @@ export function OutcomeCard({ call }: { call: Call }) {
           <Text style={[text.base, s.fill]}>{typeof v === 'string' ? v : JSON.stringify(v)}</Text>
         </View>
       ))}
+      {call.answered_questions.length ? (
+        <>
+          <Text style={[text.subhead, s.subhead]}>Questions asked</Text>
+          {call.answered_questions.map((q, i) => (
+            <View key={q.id} style={i > 0 && s.answered}>
+              <Text style={[text.m, s.strong]}>{q.question}</Text>
+              <Text style={[text.m, { color: color.soft }]}>{q.answer}</Text>
+            </View>
+          ))}
+        </>
+      ) : null}
     </Card>
   );
 }
 
 const label = (k: string) => (k.charAt(0).toUpperCase() + k.slice(1)).replace(/_/g, ' ');
 
-export function RecordingPlayer({ call }: { call: Call }) {
-  const [playing, setPlaying] = useState(false);
-  const stop = useRef<(() => void) | null>(null);
-  const rec = call.recordings?.[0];
+/** What the call was asked to do and how, collapsed (finished calls). */
+export function CallRequest({ call }: { call: Call }) {
   return (
-    <Card label="Recording">
-      <T v="h2">Recording</T>
-      {!call.recorded ? (
-        <T v="muted">
-          <Text style={s.strong}>Not recorded.</Text> Recording was off for this call.
-        </T>
-      ) : !rec ? (
-        <T v="muted">The recording is still being processed. It shows here in a minute or two.</T>
-      ) : (
-        <View style={s.recRow}>
-          <Button
-            label={playing ? 'Stop' : 'Play recording'}
-            kind="secondary"
-            a11yLabel={playing ? 'Stop recording' : `Play recording, ${duration(rec.duration_seconds)}`}
-            onPress={() => {
-              if (playing) return stop.current?.();
-              setPlaying(true);
-              stop.current = playUrl(rec.url, () => setPlaying(false));
-            }}
-          />
-          <T v="fine">{duration(rec.duration_seconds)} · both sides</T>
-          <Button label="Download mp3" kind="link" onPress={() => void Linking.openURL(rec.url)} />
+    <Card label="Call options">
+      <Disclosure title="Call options">
+        <View style={s.request}>
+          <Text style={text.soft}>
+            <Text style={text.muted}>Goal: </Text>
+            {call.goal}
+          </Text>
+          <Text style={text.fine}>{modeLine(call)}</Text>
+          <Text style={text.fine}>
+            {call.calling_number ? `Caller ID ${phone(call.calling_number)} · ` : ''}
+            {call.recorded ? 'Recorded' : 'Not recorded'}
+          </Text>
         </View>
-      )}
-    </Card>
-  );
-}
-
-export function AnsweredQuestions({ questions }: { questions: Question[] }) {
-  if (!questions.length) return null;
-  return (
-    <Card label="Questions">
-      <T v="h2">Questions</T>
-      {questions.map((q, i) => (
-        <View key={q.id} style={i > 0 && s.answered}>
-          <Text style={[text.m, s.strong]}>{q.question}</Text>
-          <Text style={[text.m, { color: color.soft }]}>{q.answer}</Text>
-        </View>
-      ))}
+      </Disclosure>
     </Card>
   );
 }
@@ -263,9 +312,15 @@ const s = StyleSheet.create({
   inline: { flexDirection: 'row', alignItems: 'center', gap: space.xs },
   lines: { maxHeight: transcriptHeight, backgroundColor: color.card2, borderRadius: radius.l },
   linesInner: { padding: space.ml, gap: space.sm },
-  line: { maxWidth: lineMaxWidth, alignSelf: 'flex-start', paddingVertical: space.sm, paddingHorizontal: space.ml, borderRadius: radius.l, backgroundColor: color.bubble },
-  lineAi: { alignSelf: 'flex-end', backgroundColor: color.bubbleAi },
-  lineOwner: { alignSelf: 'flex-end', backgroundColor: color.okSoft, borderWidth: border.thin, borderColor: color.okLine },
+  top: { marginBottom: space.ml },
+  line: { maxWidth: lineMaxWidth, alignSelf: 'flex-start', paddingVertical: space.sm, paddingHorizontal: space.ml, borderRadius: radius.l, backgroundColor: color.bubble, borderWidth: border.thin, borderColor: color.bubble },
+  lineAi: { alignSelf: 'flex-end', backgroundColor: color.bubbleAi, borderColor: color.bubbleAi },
+  lineOwner: { alignSelf: 'flex-end', backgroundColor: color.okSoft, borderColor: color.okLine },
+  lineJump: { cursor: 'pointer' },
+  lineHover: { borderColor: color.line },
+  lineNow: { borderColor: color.brand, backgroundColor: color.selected },
+  request: { gap: space.s, marginTop: space.xs },
+  subhead: { marginTop: space.l, marginBottom: space.xs },
   event: { alignSelf: 'center', paddingHorizontal: space.sm },
   eventText: { color: color.muted, fontSize: font.size.s, textAlign: 'center' },
   who: { color: color.muted, fontSize: font.size.xs, fontWeight: font.weight.semi },
@@ -278,6 +333,5 @@ const s = StyleSheet.create({
   kv: { flexDirection: 'row', gap: space.l, marginTop: space.s },
   kvKey: { color: color.muted, minWidth: space.x5 * 2 },
   strong: { color: color.fg, fontWeight: font.weight.bold },
-  recRow: { gap: space.sm },
   answered: { borderTopWidth: border.thin, borderTopColor: color.line, paddingTop: space.m, marginTop: space.m },
 });
