@@ -9,7 +9,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from callenvoy import calls, config, demo_line, guard, main, mcp_server, owner, store
 
-from .conftest import CALL, KEY, run
+from .conftest import CALL, KEY, owner_cookie, run
 
 AUTH = {"Authorization": f"Bearer {KEY}"}
 BASE = "http://localhost:3020"
@@ -44,7 +44,8 @@ def test_web_export_routes(client):
 
 def test_api_auth_and_unknown(client):
     assert client.get("/callenvoy/api/profile").status_code == 401
-    assert client.get("/callenvoy/api/profile", headers={"Authorization": "Bearer wrong"}).json() == {"detail": "unauthorized"}
+    r = client.get("/callenvoy/api/profile", headers={"Authorization": "Bearer wrong"})
+    assert r.status_code == 401 and r.json()["code"] == "malformed_key" and "wrong" not in r.text
     r = client.get("/callenvoy/api/nothing", headers=AUTH)
     assert r.status_code == 404 and r.json() == {"detail": "not found"}
     cfg = client.get("/callenvoy/api/config", headers=AUTH).json()
@@ -72,6 +73,7 @@ def test_console_call_flow_and_errors(client):
 
 
 def test_push_subscription_rules(client):
+    AUTH = owner_cookie()  # owner-only routes
     sub = {"endpoint": "https://evil.example.com/x", "keys": {"p256dh": "p", "auth": "a"}}
     assert client.post("/callenvoy/api/push/subscriptions", json=sub, headers=AUTH).json()["field"] == "endpoint"
     sub["endpoint"] = "https://fcm.googleapis.com/fcm/send/1"
@@ -92,7 +94,11 @@ def test_mcp_http_auth_and_key_in_path(client):
     assert r.status_code == 200 and r.json()["result"]["serverInfo"]["name"] == "CallEnvoy"
     r = client.post(f"/callenvoy/mcp/{KEY}", json=INIT, headers=MCP_HEADERS)
     assert r.status_code == 200
-    assert client.post("/callenvoy/mcp/wrongkey", json=INIT, headers=MCP_HEADERS).status_code == 401
+    assert r.headers["x-robots-tag"] == "noindex"
+    assert client.post(f"/callenvoy/mcp/%22{KEY}%22", json=INIT, headers=MCP_HEADERS).status_code == 200  # cleaned
+    assert client.post("/callenvoy/mcp", json=INIT, headers={**MCP_HEADERS, **owner_cookie()}).status_code == 401
+    r = client.post("/callenvoy/mcp/wrongkey", json=INIT, headers=MCP_HEADERS)
+    assert r.status_code == 401 and r.headers["x-robots-tag"] == "noindex" and "wrongkey" not in r.text
 
 
 def test_mcp_in_process_tools_and_profile_round_trip():

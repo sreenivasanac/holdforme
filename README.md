@@ -2,7 +2,7 @@
 
 A private phone-call server for AI agents. An agent (Claude Code, Codex, Claude Desktop, Grok, or any MCP client) asks CallEnvoy to call a business. The AI presses the menu keys, waits on hold, and talks to the person. You can get an alert, listen in, take the call over, and hand it back.
 
-- Live at `https://pragnyalabs.com/callenvoy` (one owner, one API key).
+- Live at `https://pragnyalabs.com/callenvoy` (one owner; named API keys for agents, email sign-in for the console).
 - Design and API follow [Call4me](https://github.com/skeptrunedev/call4me) (MIT) where that fits. Thank you to its author.
 - Earlier this repository held the hackathon project HoldForMe / CallOrHold4Me.
 
@@ -23,13 +23,26 @@ Menu keys: Twilio cannot send keys on an open audio stream, and a Twilio menu ig
 
 ## Connect an agent
 
-The console page **Connect** shows these lines with your key filled in.
+Create a key on the console page **Agents**; it shows these lines with the new key filled in.
 
 ```bash
-claude mcp add --transport http callenvoy https://pragnyalabs.com/callenvoy/mcp --header "Authorization: Bearer <key>"
+claude mcp add --scope user --transport http callenvoy https://pragnyalabs.com/callenvoy/mcp --header "Authorization: Bearer <key>"
 ```
 
 Clients that cannot send headers (Grok) use `https://pragnyalabs.com/callenvoy/mcp/<key>`. Prefer the header form: a key in a URL can end up in logs.
+
+## Sign-in and keys
+
+| Credential | How | Opens |
+|---|---|---|
+| Agent key | `Authorization: Bearer <key>` or `/mcp/<key>` | `/mcp`, `/api/calls*`, `/api/profile`, `/api/config`, `/api/caller-id*` |
+| Owner session | cookie `ce_session` after an email sign-in link (30 days) | every `/api/*` route, including the owner-only `/api/keys*` and `/api/push/*` |
+
+- Keys look like `ce_live_` + 32 characters. You can have up to 20, each with a name, a last-used time, and Disable / Enable / Delete. A key is shown once; the server stores only its SHA-256 hash.
+- Upgrade from one key: at the first start with an empty key list, `CALLENVOY_API_KEY` is stored as the key "First key (.env)". Then remove it from `.env` (the server starts without it; a deleted key would come back if the list is empty again and the variable is still set).
+- The console asks for an email address and mails a one-time link (15 minutes) to `OWNER_EMAIL` only. Mail settings: `OWNER_EMAIL`, `SMTP_HOST`, `SMTP_PORT` (default 587, STARTTLS), `SMTP_USER`, `SMTP_PASSWORD`, `MAIL_FROM`. At most 5 link requests per hour.
+- First use without mail, or recovery: on the server, in the app folder, run `uv run python -m callenvoy.signin`. It prints a one-time sign-in link (it reads `PUBLIC_BASE_URL` from `.env`).
+- A refused request gets 401 `{"error", "code"}` with `code` one of `no_credential`, `bad_key`, `key_disabled`, `malformed_key`, `session_expired`. An agent key on an owner-only route gets 403 `owner_only`; a console write from a foreign `Origin` gets 403 `bad_origin`.
 
 Tools (prefix `callenvoy_`): `place_call`, `get_call`, `hang_up`, `list_calls`, `answer_question`, `connect_me`, `hand_back`, `get_recordings`, `get_profile`, `save_profile`, `list_voices`, `verify_number`.
 
@@ -66,7 +79,7 @@ The three Indian English voices are community voices on Fish Audio; if one is re
 
 ## Limits
 
-US and Canada numbers only; premium and non-US/Canada area codes are blocked. 30 minutes planned per call (extended on hold or in a live talk), 120 at most, 2 calls at one time, 240 minutes per day. Calls are recorded by default; some US states require all parties to agree to a recording, and that is the owner's duty.
+US and Canada numbers only; premium and non-US/Canada area codes are blocked. 30 minutes planned per call (extended on hold or in a live talk), 120 at most, 2 calls at one time, 240 minutes per day. Calls are recorded by default; some US states require all parties to agree to a recording, and that is the owner's duty. The server keeps a copy of each recording mp3 in `data/recordings/` (fetched from Twilio on first play) and serves it with HTTP Range, so players can seek.
 
 ## Run locally
 
@@ -77,7 +90,7 @@ pnpm --dir client install && pnpm --dir client run build
 uv run uvicorn callenvoy.main:app --host 127.0.0.1 --port 3020
 ```
 
-Console development without the server: `pnpm --dir client run mock` (sample data, key `dev-key`) and `pnpm --dir client start`.
+Console development without the server: `pnpm --dir client run build`, then `pnpm --dir client run mock`. The mock serves the built console with sample data at `http://localhost:3020/callenvoy/`; open `/__mock/signin` to sign in (agent key `dev-key`).
 
 Env names are in `.env.example`. Web push keys: `uv run python -m callenvoy.push --make-keys`. Voice samples (costs a few cents of Fish credit): `uv run python -m callenvoy.make_voice_samples`.
 

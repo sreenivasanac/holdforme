@@ -54,6 +54,7 @@ def test_create_call_sends_a_real_form_body(monkeypatch):
     assert not set(sent["form"]) & {"Record", "RecordingChannels", "RecordingStatusCallback"}
     run(REAL_CREATE(to="+14155550123", url="u", status_callback="s", record=True))
     assert sent["form"]["RecordingChannels"] == ["dual"] and sent["form"]["Record"] == ["true"]
+    assert sent["form"]["Trim"] == ["do-not-trim"]  # transcript `at` times need the leading silence
 
 
 def test_settings_order_and_bad_values():

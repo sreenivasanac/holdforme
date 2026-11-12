@@ -20,13 +20,6 @@ def test_refused_numbers(raw):
         guard.check_number(raw)
 
 
-def test_api_key():
-    assert guard.key_ok("k" * 40)
-    assert not guard.key_ok("k" * 39)
-    assert not guard.key_ok("")
-    assert not guard.key_ok(None)
-
-
 def test_twilio_signature_known_sample():
     # Sample from twilio-python tests/unit/test_request_validator.py
     url = "https://mycompany.com/myapp.php?foo=1&bar=2"

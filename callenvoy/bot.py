@@ -199,6 +199,7 @@ class CallBot:
         self.twilio_call_sid = twilio_call_sid
         self.owner_name = "the account holder"
         self.released = asyncio.Event()  # set while the AI has the call (not the owner)
+        self.turn_start: dict[str, float] = {}  # who -> time.time() the current turn began (transcript `at`)
         self.released.set()
         self.owner_stt: PipelineWorker | None = None
         self.owner_runner: asyncio.Task | None = None
@@ -235,6 +236,14 @@ class CallBot:
             # ask_user is async (the talk goes on) and has no Pipecat timeout: it waits QUESTION_WAIT_SECONDS for
             # an answer, then for the hand-back if the owner has the call.
             self.llm.register_function(n, getattr(self, f"_tool_{n}"), cancel_on_interruption=n != "ask_user")
+
+        @self.aggs.user().event_handler("on_user_turn_started")
+        async def _them_start(_agg, _strategy):
+            self.turn_start["them"] = time.time()
+
+        @self.aggs.assistant().event_handler("on_assistant_turn_started")
+        async def _ai_start(_agg):
+            self.turn_start["ai"] = time.time()
 
         @self.aggs.user().event_handler("on_user_turn_stopped")
         async def _them(_agg, _strategy, message):
@@ -333,7 +342,7 @@ class CallBot:
         text = (text or "").strip()
         if not text or not self.call_id:
             return
-        store.add_line(self.call_id, who, text)
+        store.add_line(self.call_id, who, text, calls.line_at(self.call_id, self.turn_start.pop(who, None)))
         calls.note_line(self.call_id, who)
         if who == "ai":
             row = store.get_call(self.call_id)
@@ -347,7 +356,7 @@ class CallBot:
     async def _start_owner_stt(self, rate: int) -> None:
         """A second tiny pipeline (Deepgram -> sink) for the owner's speech, while the owner has the call."""
         async def on_text(text: str) -> None:
-            store.add_line(self.call_id, "owner", text)
+            store.add_line(self.call_id, "owner", text, calls.line_at(self.call_id))  # end of the words: no start time
             await self.tell(f"{self.owner_name} said to them: {text}", run_llm=False)
 
         self.owner_stt = PipelineWorker(

@@ -4,32 +4,38 @@ Run: uv run uvicorn callenvoy.main:app --host 127.0.0.1 --port 3020 --no-access-
 live call state is in memory). Everything lives under BASE_PATH (/callenvoy), which nginx passes through.
 """
 
+import asyncio
 import contextlib
 import logging
 import os
+import re
 import sys
+from typing import Annotated
 from urllib.parse import urlparse
 from xml.sax.saxutils import escape, quoteattr
 
+import httpx
 from fastapi import FastAPI, Query, Request, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from loguru import logger as loguru_logger
 from mcp.server.transport_security import TransportSecuritySettings
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
+from starlette.requests import HTTPConnection
 
-from . import calls, config, demo_line, guard, mcp_server, owner, owner_audio, push, store, twilio_api
+from . import auth, calls, config, demo_line, guard, mcp_server, owner, owner_audio, push, store, twilio_api
 
 log = logging.getLogger("callenvoy")
 
 
 def startup_checks() -> None:
-    """Refuses to start without a strong API key. Outside dev mode (CALLENVOY_DEV=1) it also needs an https
-    PUBLIC_BASE_URL, every provider key and the web export. Messages name the variable, never its value."""
-    if len(guard.api_key()) < config.API_KEY_MIN_LENGTH:
-        raise SystemExit(f"CALLENVOY_API_KEY is missing or shorter than {config.API_KEY_MIN_LENGTH} characters")
+    """Refuses a weak CALLENVOY_API_KEY (optional: only imported once as the first key). Outside dev mode
+    (CALLENVOY_DEV=1) it also needs an https PUBLIC_BASE_URL, every provider key and the web export.
+    Messages name the variable, never its value."""
+    if 0 < len(config.env("CALLENVOY_API_KEY").strip()) < config.API_KEY_MIN_LENGTH:
+        raise SystemExit(f"CALLENVOY_API_KEY is shorter than {config.API_KEY_MIN_LENGTH} characters")
     if config.dev_mode():
         return
     if not config.env("PUBLIC_BASE_URL").startswith("https://"):
@@ -66,6 +72,7 @@ async def lifespan(_app):
     quiet_logs()
     startup_checks()
     store.open_db()
+    auth.import_env_key()
     await calls.restart_cleanup()
     async with mcp_server.server.session_manager.run():
         yield
@@ -75,9 +82,23 @@ api = FastAPI(title=config.APP_NAME, docs_url=None, redoc_url=None, openapi_url=
 api.router.routes.extend(_mcp_app.routes)  # POST /mcp, served by the SDK's ASGI handler
 
 
+PUBLIC_API = {"/api/demo-line", "/api/auth/me", "/api/auth/request", "/api/auth/verify", "/api/auth/sign-out"}
+OWNER_ONLY = ("/api/keys", "/api/auth/", "/api/push/")  # an owner session only, never an agent key
+UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _noindex(send):
+    async def wrapped(message):
+        if message["type"] == "http.response.start":
+            message = {**message, "headers": [*message.get("headers", []), (b"x-robots-tag", b"noindex")]}
+        await send(message)
+    return wrapped
+
+
 class AuthMiddleware:
-    """Bearer key for /mcp and /api/* (except the Twilio-signed demo line). /mcp/<key> is rewritten to /mcp.
-    401 carries no detail. The key-in-path form is never logged (run uvicorn with --no-access-log)."""
+    """/mcp: agent key. /api/*: agent key (not on OWNER_ONLY routes) or the owner's session cookie; PUBLIC_API
+    needs neither. /mcp/<key> is rewritten to /mcp. Errors: {"error", "code"}. The key-in-path form is never
+    logged (run uvicorn with --no-access-log)."""
 
     def __init__(self, app):
         self.app = app
@@ -87,25 +108,41 @@ class AuthMiddleware:
             return await self.app(scope, receive, send)
         root = scope.get("root_path", "")
         path = scope["path"][len(root):] if scope["path"].startswith(root) else scope["path"]
+        if scope["method"] == "OPTIONS" and path.startswith("/api/"):  # CORS preflight carries no credential
+            return await self.app(scope, receive, send)
+        conn = HTTPConnection(scope)
         key = None
         if path.startswith("/mcp/"):
             key = path[len("/mcp/"):].rstrip("/")
             scope = {**scope, "path": root + "/mcp", "raw_path": (root + "/mcp").encode()}
-        elif path == "/mcp" or (path.startswith("/api/") and path != "/api/demo-line"):
-            auth = dict(scope["headers"]).get(b"authorization", b"").decode("latin-1")
-            key = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+            send = _noindex(send)
+        elif path == "/mcp" or path.startswith("/api/"):
+            key = conn.headers.get("authorization")
         else:
             return await self.app(scope, receive, send)
-        if scope["method"] == "OPTIONS" and path.startswith("/api/"):  # CORS preflight carries no key
-            return await self.app(scope, receive, send)
-        if not guard.key_ok(key):
-            return await JSONResponse({"detail": "unauthorized"}, status_code=401)(scope, receive, send)
+        try:
+            if path.startswith("/api/") and key is None:
+                # Cookie (or no credential): the browser. Its writes must come from our own page.
+                if scope["method"] in UNSAFE and not owner_audio.origin_ok(conn.headers.get("origin")):
+                    raise auth.AuthError("bad_origin", "request from a foreign page", 403)
+                if path not in PUBLIC_API:
+                    cookie = conn.cookies.get(config.SESSION_COOKIE)
+                    if not cookie:
+                        raise auth.AuthError("no_credential", "sign in, or send Authorization: Bearer <key>")
+                    if not auth.session(cookie):
+                        raise auth.AuthError("session_expired", "the session has ended; sign in again")
+            elif path not in PUBLIC_API:
+                auth.check_key(key)
+                if path.startswith(OWNER_ONLY):
+                    raise auth.AuthError("owner_only", "agent keys cannot use this; sign in to the console", 403)
+        except auth.AuthError as e:
+            return await JSONResponse({"error": str(e), "code": e.code}, status_code=e.status)(scope, receive, send)
         return await self.app(scope, receive, send)
 
 
 api.add_middleware(AuthMiddleware)
 if config.dev_mode():  # local Expo dev server only; production is same-origin
-    api.add_middleware(CORSMiddleware, allow_origins=[config.DEV_ORIGIN], allow_methods=["*"],
+    api.add_middleware(CORSMiddleware, allow_origins=[config.DEV_ORIGIN], allow_methods=["*"], allow_credentials=True,
                        allow_headers=["Authorization", "Content-Type"])
 
 
@@ -271,25 +308,139 @@ async def push_test():
     return {"sent": await push.send(push.payload({"business": ""}, "test", False))}
 
 
+# --- agent keys (owner session only, see AuthMiddleware) ---
+
+KeyName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=config.KEY_NAME_MAX)]
+
+
+class NewKey(BaseModel):
+    name: KeyName
+
+
+class KeyChange(BaseModel):
+    name: KeyName | None = None
+    disabled: bool | None = None
+
+
+def _key(key_id: str) -> dict:
+    row = store.key_by("id", key_id)
+    if not row:
+        raise calls.CallError("no such key", 404)
+    return row
+
+
+@api.get("/api/keys")
+async def list_keys():
+    return {"keys": [auth.key_view(r) for r in store.keys()]}
+
+
+@api.post("/api/keys", status_code=201)
+async def create_key(body: NewKey):
+    if len(store.keys()) >= config.MAX_KEYS:
+        raise calls.CallError(f"at most {config.MAX_KEYS} keys; delete one first", 409)
+    row, key = auth.create_key(body.name)
+    view = auth.key_view(row)
+    return {k: view[k] for k in ("id", "name", "prefix", "created_at")} | {"key": key}
+
+
+@api.patch("/api/keys/{key_id}")
+async def change_key(key_id: str, body: KeyChange):
+    _key(key_id)
+    changes = {k: int(v) if k == "disabled" else v for k, v in body.model_dump(exclude_none=True).items()}
+    if changes:
+        store.update_key(key_id, **changes)
+    return auth.key_view(_key(key_id))
+
+
+@api.delete("/api/keys/{key_id}", status_code=204)
+async def delete_key(key_id: str):
+    _key(key_id)
+    store.delete_key(key_id)
+    return Response(status_code=204)
+
+
+# --- owner sign-in (public routes; the session cookie is the only owner credential) ---
+
+class SignInRequest(BaseModel):
+    email: str = Field(min_length=1, max_length=254)
+
+
+class SignInToken(BaseModel):
+    token: str = Field(min_length=1, max_length=200)
+
+
+@api.get("/api/auth/me")
+async def auth_me(request: Request):
+    s = auth.session(request.cookies.get(config.SESSION_COOKIE))
+    return {"signed_in": bool(s), "email": s["email"] if s else None, "mail_ready": auth.mail_ready()}
+
+
+@api.post("/api/auth/request")
+async def auth_request(body: SignInRequest):
+    """Always {"ok": true}: the reply never tells whether the address is the owner's."""
+    if not auth.allow_signin_request():
+        return JSONResponse({"error": "too many sign-in requests; try again in an hour", "code": "rate_limited"},
+                            status_code=429)
+    if auth.mail_ready() and body.email.strip().lower() == auth.owner_email().lower():
+        auth.mail_signin_link()
+    return {"ok": True}
+
+
+@api.post("/api/auth/verify")
+async def auth_verify(body: SignInToken):
+    if not auth.take_signin_token(body.token):
+        return JSONResponse({"error": "this sign-in link was used, has expired, or is unknown", "code": "bad_link"},
+                            status_code=400)
+    email = auth.owner_email() or None
+    r = JSONResponse({"ok": True, "email": email})
+    r.set_cookie(config.SESSION_COOKIE, auth.new_session(email), max_age=config.SESSION_DAYS * 86400,
+                 path=config.BASE_PATH, secure=True, httponly=True, samesite="strict")
+    return r
+
+
+@api.post("/api/auth/sign-out")
+async def auth_sign_out(request: Request):
+    auth.end_session(request.cookies.get(config.SESSION_COOKIE))
+    r = JSONResponse({"ok": True})
+    r.delete_cookie(config.SESSION_COOKIE, path=config.BASE_PATH, secure=True, httponly=True, samesite="strict")
+    return r
+
+
 # --- recordings ---
+
+_fetching: dict[str, asyncio.Lock] = {}
+
+
+async def recording_file(sid: str):
+    """The recording mp3 on disk, fetched from Twilio on first use (a .part file until complete)."""
+    path = config.RECORDINGS_DIR / f"{sid}.mp3"
+    async with _fetching.setdefault(sid, asyncio.Lock()):
+        if not path.is_file():
+            config.RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+            config.RECORDINGS_DIR.chmod(0o700)
+            part = path.with_suffix(".part")
+            try:
+                with open(os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as f:
+                    async for chunk in twilio_api.fetch_recording(sid):
+                        f.write(chunk)
+                part.rename(path)
+            finally:
+                part.unlink(missing_ok=True)
+    return path
+
 
 @api.get("/r/{token}")
 async def recording(token: str):
+    """No key: the long random token is the credential. Range requests work (FileResponse), so players can seek."""
     row = store.find_call("recording_token", token) if len(token) >= 16 else None
-    if not row or not row["recording_sid"]:
+    if not row or not row["recording_sid"] or not re.fullmatch(r"RE\w{1,64}", row["recording_sid"]):
         return JSONResponse({"detail": "not found"}, status_code=404)
-    stream = twilio_api.fetch_recording(row["recording_sid"])
     try:
-        first = await anext(stream)
-    except (twilio_api.TwilioError, StopAsyncIteration):
+        path = await recording_file(row["recording_sid"])
+    except (twilio_api.TwilioError, OSError, httpx.HTTPError) as e:
+        log.warning("recording fetch failed: %s", type(e).__name__)
         return JSONResponse({"detail": "recording not available"}, status_code=502)
-
-    async def body():
-        yield first
-        async for chunk in stream:
-            yield chunk
-
-    return StreamingResponse(body(), media_type="audio/mpeg")
+    return FileResponse(path, media_type="audio/mpeg", headers={"Cache-Control": "private, max-age=3600"})
 
 
 # --- Twilio webhooks (signature checked) ---

@@ -43,7 +43,8 @@ async def create_call(*, to: str, url: str, status_callback: str, record: bool =
             ("StatusCallback", status_callback), ("StatusCallbackMethod", "POST")]
     data += [("StatusCallbackEvent", e) for e in ("initiated", "ringing", "answered", "completed")]
     if record:
-        data += [("Record", "true"), ("RecordingChannels", "dual"),
+        # Trim: the Calls API default trims leading silence, which would shift transcript `at` times.
+        data += [("Record", "true"), ("RecordingChannels", "dual"), ("Trim", "do-not-trim"),
                  ("RecordingStatusCallback", status_callback), ("RecordingStatusCallbackEvent", "completed")]
     if time_limit:
         data.append(("TimeLimit", str(time_limit)))

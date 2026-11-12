@@ -9,6 +9,7 @@ BASE_PATH = "/callenvoy"
 TOOL_PREFIX = "callenvoy_"
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "data" / "callenvoy.db"
+RECORDINGS_DIR = ROOT / "data" / "recordings"  # mp3 copies fetched once from Twilio (dir 700, files 600)
 WEB_DIR = ROOT / "client" / "dist"
 VOICES_DIR = Path(__file__).resolve().parent / "static" / "voices"
 WEB_BUILD_COMMAND = "pnpm --dir client exec expo export --platform web"
@@ -92,6 +93,22 @@ OWNER_GATHER_SECONDS = 10  # "Press 1 to join" wait on the owner's phone
 OWNER_PROMPT_SECONDS = 15  # margin for answering late and hearing the spoken prompt before the Gather wait
 DEMO_TICKET_SECONDS = 120  # the demo line's stream token lives this long
 DEMO_REP_MAX_SECONDS = 600  # hard limit for one demo rep call
+
+# --- Agent keys and the owner's sign-in ---
+KEY_PREFIX = "ce_live_"
+KEY_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"  # no look-alikes (0/o, 1/l/i)
+KEY_BODY_LENGTH = 32
+KEY_DISPLAY_LENGTH = 12  # the stored, shown prefix
+KEY_NAME_MAX = 40
+MAX_KEYS = 20
+KEY_USE_WRITE_SECONDS = 60  # last_used_at is written at most this often per key
+IMPORTED_KEY_NAME = "First key (.env)"
+SESSION_COOKIE = "ce_session"
+SESSION_DAYS = 30
+SIGNIN_TOKEN_MINUTES = 15
+SIGNIN_REQUESTS_PER_HOUR = 5  # all sign-in mail requests together
+SMTP_PORT = 587  # STARTTLS
+SMTP_TIMEOUT_SECONDS = 20
 
 # --- Web push ---
 PUSH_TTL_SECONDS = 60

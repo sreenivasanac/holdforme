@@ -9,6 +9,7 @@ import logging
 import secrets
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -90,6 +91,7 @@ class Live:
     tasks: list[asyncio.Task] = field(default_factory=list)  # watchdog, grace timers
     last_them: float = 0.0  # monotonic time of the last line from the other side
     last_talk: float = 0.0  # last line from anyone (them, ai, owner)
+    answered: float = 0.0  # time.time() of the answer: the recording starts there
 
 
 LIVE: dict[str, Live] = {}
@@ -115,7 +117,24 @@ def spawn(call_id: str, coro) -> asyncio.Task:
 
 
 def event(call_id: str, text: str) -> None:
-    store.add_line(call_id, "event", text)
+    store.add_line(call_id, "event", text, line_at(call_id))
+
+
+def line_at(call_id: str, started: float | None = None) -> float | None:
+    """Seconds from the start of the recording (the answer; Twilio does not trim it) to `started` (default now)."""
+    live = LIVE.get(call_id)
+    if not live or not live.answered:
+        return None
+    t = (started or time.time()) - live.answered
+    return round(t, 1) if t >= 0 else None
+
+
+def _line_view(line: dict, answered_at: str | None) -> dict:
+    """Lines stored before `at` existed: best effort from the line time (whole seconds) minus answered_at."""
+    if line["at"] is None and answered_at:
+        t = (_ts(line["t"]) - _ts(answered_at)).total_seconds()
+        line["at"] = round(t, 1) if t >= 0 else None
+    return line
 
 
 # --- Settings (section 4a): call value wins, then the saved setting, then the constant ---
@@ -193,12 +212,14 @@ def check_limits() -> None:
         raise CallError(f"today's limit of {config.DAILY_MINUTE_CAP} call minutes is reached", 429)
 
 
+def _ts(iso: str) -> datetime:
+    return datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
 def _elapsed(row: dict) -> int:
     if not row.get("answered_at"):
         return 0
-    from datetime import datetime, timezone
-    start = datetime.strptime(row["answered_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    return int((datetime.now(timezone.utc) - start).total_seconds())
+    return int((datetime.now(timezone.utc) - _ts(row["answered_at"])).total_seconds())
 
 
 def minutes_used_today() -> int:
@@ -325,7 +346,7 @@ def view(row: dict, since_line: int = 0, transcript: bool = True) -> dict:
         "recordings": recordings(row),
     }
     if transcript:
-        v["transcript"] = store.lines(cid, since_line)
+        v["transcript"] = [_line_view(line, row["answered_at"]) for line in store.lines(cid, since_line)]
         v["next_line"] = store.next_line(cid)
     return v
 
@@ -563,9 +584,16 @@ async def on_status(call_id: str, form: dict, leg: str = "business") -> None:
         elif not (live and live.moved_from):  # else _stream_lost writes the summary and finishes
             await finish(call_id)
     elif status == "in_progress" and not row["answered_at"]:
+        answered(call_id)
         store.update_call(call_id, status=status, answered_at=store.now())
     elif status != row["status"] and row["status"] != "in_progress":
         store.update_call(call_id, status=status)
+
+
+def answered(call_id: str) -> None:
+    live = LIVE.get(call_id)
+    if live and not live.answered:
+        live.answered = time.time()
 
 
 async def stream_started(call_id: str, bot) -> None:
@@ -578,6 +606,7 @@ async def stream_started(call_id: str, bot) -> None:
         return
     fields = {"status": "in_progress"}
     if not row["answered_at"]:
+        answered(call_id)
         fields["answered_at"] = store.now()
     store.update_call(call_id, **fields)
     spawn(call_id, watchdog(call_id))

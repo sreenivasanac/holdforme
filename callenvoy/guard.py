@@ -1,4 +1,4 @@
-"""Phone number rules, API key check, Twilio signature check and one-use tickets."""
+"""Phone number rules, Twilio signature check and one-use tickets. Keys and sessions: auth.py."""
 
 import base64
 import hashlib
@@ -33,17 +33,6 @@ def check_number(raw: str) -> str:
     if m.group(1) in config.BLOCKED_AREA_CODES:
         raise ValueError(f"area code {m.group(1)} is blocked (premium rate or outside the US and Canada)")
     return n
-
-
-def api_key() -> str:
-    return config.env("CALLENVOY_API_KEY")
-
-
-def key_ok(given: str | None) -> bool:
-    expected = api_key()
-    if not given or len(expected) < config.API_KEY_MIN_LENGTH:
-        return False
-    return hmac.compare_digest(given.encode(), expected.encode())
 
 
 def twilio_signature(url: str, params: dict, token: str) -> str:
