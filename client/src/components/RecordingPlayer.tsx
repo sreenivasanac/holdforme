@@ -83,7 +83,7 @@ export function RecordingPlayer({ player, url }: { player: PlayerControl; url: s
       ) : (
         <View style={s.row}>
           <T v="fine">{p.loading ? 'Loading the recording...' : 'Both sides of the call'}</T>
-          <Button label="Download mp3" kind="link" onPress={() => void Linking.openURL(url)} />
+          <Button label="Download mp3" kind="link" onPress={() => void Linking.openURL(`${url}?download=1`)} />
         </View>
       )}
     </View>

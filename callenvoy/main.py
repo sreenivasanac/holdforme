@@ -433,8 +433,9 @@ async def recording_file(sid: str):
 
 
 @api.get("/r/{token}")
-async def recording(token: str):
-    """No key: the long random token is the credential. Range requests work (FileResponse), so players can seek."""
+async def recording(token: str, download: bool = False):
+    """No key: the long random token is the credential. Range requests work (FileResponse), so players can seek.
+    ?download=1 makes the browser save the file (the console's Download link)."""
     row = store.find_call("recording_token", token) if len(token) >= 16 else None
     if not row or not row["recording_sid"] or not re.fullmatch(r"RE\w{1,64}", row["recording_sid"]):
         return JSONResponse({"detail": "not found"}, status_code=404)
@@ -443,7 +444,8 @@ async def recording(token: str):
     except (twilio_api.TwilioError, OSError, httpx.HTTPError) as e:
         log.warning("recording fetch failed: %s", type(e).__name__)
         return JSONResponse({"detail": "recording not available"}, status_code=502)
-    return FileResponse(path, media_type="audio/mpeg", headers={"Cache-Control": "private, max-age=3600"})
+    return FileResponse(path, media_type="audio/mpeg", headers={"Cache-Control": "private, max-age=3600"},
+                        filename=f"callenvoy-{row['id']}.mp3" if download else None)
 
 
 # --- Twilio webhooks (signature checked) ---
