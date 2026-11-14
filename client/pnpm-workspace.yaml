@@ -1,0 +1,2 @@
+# Expo recommends hoisted node_modules with pnpm (create-expo-app sets this).
+nodeLinker: hoisted

@@ -1,0 +1,31 @@
+{
+  "name": "callenvoy-console",
+  "version": "1.0.0",
+  "main": "expo-router/entry",
+  "dependencies": {
+    "@expo/metro-runtime": "~58.0.17",
+    "expo": "~58.0.23",
+    "expo-constants": "~58.0.15",
+    "expo-linking": "~58.0.16",
+    "expo-router": "~58.0.30",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-native": "0.88.1",
+    "react-native-safe-area-context": "~5.11.1",
+    "react-native-screens": "~4.30.1",
+    "react-native-web": "^0.21.4"
+  },
+  "devDependencies": {
+    "@types/react": "~19.3.0",
+    "typescript": "~6.0.3"
+  },
+  "scripts": {
+    "start": "expo start --web",
+    "build": "expo export --platform web",
+    "typecheck": "tsc --noEmit",
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test test/*.test.mjs",
+    "mock": "node dev/mock-api.mjs"
+  },
+  "private": true,
+  "packageManager": "pnpm@11.15.0"
+}

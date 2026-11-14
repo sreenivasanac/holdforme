@@ -1,5 +1,14 @@
-node_modules
-.next
+# Python
+.venv/
+__pycache__/
+.pytest_cache/
+data/
+
+# Expo client
+client/node_modules/
+client/dist/
+client/.expo/
+
+# Secrets
+.env
 .env*.local
-next-env.d.ts
-tsconfig.tsbuildinfo
