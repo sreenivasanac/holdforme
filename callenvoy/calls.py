@@ -526,6 +526,9 @@ async def verify_number(user_id: str) -> dict:
                 "message": f"{number} is already a verified caller ID"}
     if await _twilio_verified(number):  # verified, but not by this user: another account's number
         raise CallError("this number cannot be verified for this account", 409, field="callback_number")
+    if store.caller_id_claim_busy(user_id, number):
+        raise CallError("a verification of this number is in progress; try again in 10 minutes", 409,
+                        field="callback_number")
     try:
         code = await twilio_api.start_caller_id_validation(number)
     except Exception as e:  # noqa: BLE001

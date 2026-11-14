@@ -54,7 +54,7 @@ def signups_open() -> bool:
     return bool(store.service_setting("signups_open", config.SIGNUPS_OPEN_DEFAULT))
 
 
-_EMAIL = re.compile(r"[^@\s\"<>,;]+@[^@\s\"<>,;]+\.[^@\s\"<>,;.]{2,}")
+_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")  # ASCII only: smtplib, no header tricks
 
 
 def email_ok(email: str) -> bool:
@@ -155,17 +155,22 @@ _requests: dict[str, list[float]] = {}  # bucket -> request times (in memory; on
 
 
 def allow_signin_request(email: str, ip: str) -> bool:
-    """Per address, per client IP and global limits (config.SIGNIN_LIMIT_*). A request counts in all three."""
+    """Per address and per client IP limits, and one shared limit for addresses without an account
+    (config.SIGNIN_LIMIT_*). People who have an account are not in the shared limit, so a flood of new
+    addresses cannot lock them out. Only an accepted request is stored: refused ones use no memory."""
     now = clock()
-    buckets = {f"a:{email}": config.SIGNIN_LIMIT_PER_ADDRESS, f"i:{ip}": config.SIGNIN_LIMIT_PER_IP,
-               "all": config.SIGNIN_LIMIT_GLOBAL}
-    for name, (limit, window) in buckets.items():
-        times = [t for t in _requests.get(name, []) if t > now - window]
-        _requests[name] = times
-        if len(times) >= limit:
-            return False
-    for name in buckets:
-        _requests[name].append(now)
+    buckets = {f"a:{email}": config.SIGNIN_LIMIT_PER_ADDRESS, f"i:{ip}": config.SIGNIN_LIMIT_PER_IP}
+    if not store.user_by_email(email):
+        buckets["new"] = config.SIGNIN_LIMIT_GLOBAL
+    kept = {name: [t for t in _requests.get(name, []) if t > now - window] for name, (_, window) in buckets.items()}
+    if any(len(kept[name]) >= limit for name, (limit, _) in buckets.items()):
+        return False
+    longest = max(window for _, window in (config.SIGNIN_LIMIT_PER_ADDRESS, config.SIGNIN_LIMIT_PER_IP,
+                                           config.SIGNIN_LIMIT_GLOBAL))
+    for name in [n for n, times in _requests.items() if times[-1] <= now - longest]:
+        del _requests[name]  # buckets with nothing recent
+    for name, times in kept.items():
+        _requests[name] = times + [now]
     return True
 
 

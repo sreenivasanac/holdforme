@@ -293,7 +293,8 @@ def user_live_calls(user_id: str) -> list[dict]:
 
 def last_call_to(number: str, since: str, user_id: str | None = None) -> dict | None:
     """The newest outbound call to `number` since `since` (of one user, or of anyone for callback routing)."""
-    mine = " AND user_id = ?" if user_id else ""
+    # Routing counts only calls that were answered: a call that never connected must not capture callbacks.
+    mine = " AND user_id = ?" if user_id else " AND answered_at IS NOT NULL"
     return _row("SELECT user_id, business FROM calls WHERE direction = 'outbound' AND to_number = ? AND created_at >= ?"
                 f"{mine} ORDER BY created_at DESC, rowid DESC LIMIT 1", (number, since, *([user_id] if user_id else [])))
 
@@ -371,11 +372,20 @@ def profile_names() -> dict[str, str]:
     return {r[0]: json.loads(r[1]) for r in _q("SELECT user_id, value FROM profile WHERE key = 'name'")}
 
 
+def caller_id_claim_busy(user_id: str, number: str) -> bool:
+    """True while another user's verification of this number may still be going on. Without this, user B could
+    take the claim during user A's verification call, and A's code entry would then verify the number for B."""
+    since = json.dumps(now(-config.CALLER_ID_CLAIM_SECONDS))
+    return _q("SELECT 1 FROM profile c JOIN profile t ON t.user_id = c.user_id AND t.key = ? "
+              "WHERE c.key = ? AND c.value = ? AND c.user_id != ? AND t.value > ?",
+              (config.CALLER_ID_CLAIM_AT, config.CALLER_ID_CLAIM, json.dumps(number), user_id, since)).fetchone() is not None
+
+
 def claim_caller_id(user_id: str, number: str) -> None:
-    """The user who starts a verification of a number holds it alone: an unfinished claim of another user ends,
-    so that it cannot become valid when the number's real owner verifies it later."""
+    """The user who starts a verification of a number holds it alone: an old unfinished claim of another user
+    ends, so that it cannot become valid when the number's real owner verifies it later."""
     _q("DELETE FROM profile WHERE key = ? AND value = ?", (config.CALLER_ID_CLAIM, json.dumps(number)))
-    save_profile(user_id, {config.CALLER_ID_CLAIM: number})
+    save_profile(user_id, {config.CALLER_ID_CLAIM: number, config.CALLER_ID_CLAIM_AT: now()})
 
 
 # --- push subscriptions ---

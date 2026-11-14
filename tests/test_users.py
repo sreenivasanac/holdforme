@@ -189,7 +189,11 @@ def test_caller_id_verified_by_another_user_is_not_usable(fresh):
     for u in (a, b):
         store.save_profile(u, {"callback_number": "+14155550199"})
     run(calls.verify_number(b))  # B starts it but cannot type the code (not B's phone)
-    run(calls.verify_number(a))
+    with pytest.raises(calls.CallError, match="in progress") as busy:  # B's verification call may still be going on
+        run(calls.verify_number(a))
+    assert busy.value.status == 409 and fresh.validations == ["+14155550199"]  # A's phone did not ring again
+    store.save_profile(b, {config.CALLER_ID_CLAIM_AT: store.now(-config.CALLER_ID_CLAIM_SECONDS - 1)})
+    run(calls.verify_number(a))  # B's unfinished claim is old: A takes the number
     fresh.verified.add("+14155550199")
     assert run(calls.caller_id(a))["verified"] is True and run(calls.caller_id(b))["verified"] is False
     with pytest.raises(calls.CallError, match="cannot be verified") as e:
@@ -199,7 +203,19 @@ def test_caller_id_verified_by_another_user_is_not_usable(fresh):
         place(b, **{"from": "own"})
     with pytest.raises(calls.CallError, match="unknown setting"):  # the claim is not a setting anyone can save
         calls.save_profile(b, {config.CALLER_ID_CLAIM: "+14155550199"})
-    assert config.CALLER_ID_CLAIM not in calls.get_profile(a)
+    assert not {config.CALLER_ID_CLAIM, config.CALLER_ID_CLAIM_AT} & set(calls.get_profile(a))
+
+
+def test_caller_id_cannot_be_taken_during_the_owners_verification(fresh):
+    """A starts, B starts for the same number while A's phone rings, A types the code: B must not get A's number."""
+    a, b = uid(), new_user()
+    for u in (a, b):
+        store.save_profile(u, {"callback_number": "+14155550199"})
+    run(calls.verify_number(a))
+    with pytest.raises(calls.CallError, match="in progress"):
+        run(calls.verify_number(b))
+    fresh.verified.add("+14155550199")  # A typed the code
+    assert run(calls.caller_id(a))["verified"] is True and run(calls.caller_id(b))["verified"] is False
 
 
 def test_alerts_and_prompt_use_the_calls_user(monkeypatch, fresh):
@@ -400,6 +416,9 @@ def test_signin_rate_limits(client, monkeypatch):
     for i in range(60 - 11):  # global, over a day, from many addresses and IPs (11 so far)
         assert ask(f"g{i}@example.com", ip=f"10.0.{i}.1") == 200
     assert ask("z@example.com", ip="10.9.9.9") == 429
+    before = len(auth._requests)
+    assert ask("flood@example.com", ip="10.8.8.8") == 429 and len(auth._requests) == before  # a refusal stores nothing
+    assert ask("me@example.com", ip="10.7.7.7") == 200  # a person with an account is not in the shared limit
     now[0] += 86400
     assert ask("z@example.com", ip="10.9.9.9") == 200
 
@@ -435,7 +454,12 @@ def test_inbound_goes_to_the_last_caller_else_the_admin():
     place(business="Admin's dentist")
     place(b, business="Bo's bank")
     for r in store.live_calls():
-        store.update_call(r["id"], status="completed")
+        store.update_call(r["id"], status="completed", answered_at=store.now())
+    c = new_user("cy@example.com", "Cy")
+    store.save_profile(c, {"callback_number": "+14155550166"})
+    place(c, business="Never answered")  # newest call to the number, but it never connected: it does not count
+    for r in store.live_calls():
+        store.update_call(r["id"], status="canceled")
 
     fwd = calls.inbound({"From": "+14155550123", "CallSid": "CA1"})
     row = store.get_call(fwd["id"])
@@ -461,7 +485,7 @@ def test_inbound_goes_to_the_last_caller_else_the_admin():
 def test_inbound_long_poll_is_scoped():
     b = new_user()
     store.save_profile(b, {"callback_number": "+14155550177"})
-    place(b)
+    store.update_call(place(b)["id"], answered_at=store.now())
     fwd = calls.inbound({"From": CALL["to"], "CallSid": "CA1"})
 
     async def go():

@@ -120,6 +120,8 @@ USER_SEEN_WRITE_SECONDS = 60  # users.last_seen_at is written at most this often
 # caller IDs are shared by the whole account, so "from own" also needs this claim: no user can call from a
 # number that another user verified.
 CALLER_ID_CLAIM = "verified_caller_id"
+CALLER_ID_CLAIM_AT = "verified_caller_id_at"  # when that verification started
+CALLER_ID_CLAIM_SECONDS = 600  # another user cannot start a verification of the same number in this time
 SMTP_PORT = 587  # STARTTLS
 SMTP_TIMEOUT_SECONDS = 20
 
