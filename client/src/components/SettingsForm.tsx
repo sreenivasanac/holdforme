@@ -53,7 +53,9 @@ const SECTIONS = [
   ['settings-alerts', 'Alerts'],
   ['settings-account', 'Account'],
 ] as const;
-const SAVED_MS = 3000; // "Saved." stays this long in the bar
+export const CALLBACK_HELP = 'Your phone rings on this number for a hand-over. The AI may also give it to a business that asks for it.';
+const SAVED_MS = 3000;
+const NAME_FIELD = 'settings-name'; // "Saved." stays this long in the bar
 
 function toForm(settings: Settings): Form {
   const x = { ...settings } as Record<string, unknown>;
@@ -67,7 +69,8 @@ function toForm(settings: Settings): Form {
   };
 }
 
-export function SettingsForm({ config, settings }: { config: Config; settings: Settings }) {
+/** `focus: 'name'` moves to the name field (the New call form links there when the name is missing). */
+export function SettingsForm({ config, settings, focus }: { config: Config; settings: Settings; focus?: string }) {
   const { save, loadCallerId } = useSettings();
   const callerId = useCallerId();
   const [base, setBase] = useState<Form>(() => toForm(settings)); // what the server has
@@ -86,6 +89,9 @@ export function SettingsForm({ config, settings }: { config: Config; settings: S
     setSaved(false);
     setF((x) => ({ ...x, [k]: v }));
   };
+  useEffect(() => {
+    if (focus === 'name') scrollToId('settings-profile', NAME_FIELD);
+  }, [focus]);
   const verified = !!callerId?.verified && !!callerId.number && callerId.number === settings.callback_number;
 
   const submit = async () => {
@@ -167,7 +173,7 @@ export function SettingsForm({ config, settings }: { config: Config; settings: S
           </View>
           <Text style={text.subhead}>About you</Text>
           <Row>
-            <Cell>{textField('name', 'Your name', { autoComplete: 'name' })}</Cell>
+            <Cell>{textField('name', 'Your name', { autoComplete: 'name', nativeID: NAME_FIELD })}</Cell>
             <Cell>
               <TextField
                 label="Callback number"
@@ -176,7 +182,7 @@ export function SettingsForm({ config, settings }: { config: Config; settings: S
                 inputMode="tel"
                 autoComplete="tel"
                 error={errors.callback_number}
-                help="Your phone rings on this number for a hand-over. The AI may also give it to a business that asks for it."
+                help={CALLBACK_HELP}
               />
             </Cell>
           </Row>

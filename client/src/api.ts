@@ -102,6 +102,8 @@ export type Config = {
   ranges: Record<'max_minutes' | 'alert_wait_seconds' | 'phone_ring_seconds', [number, number]>;
   text_limits: Record<string, number>;
   vapid_public_key: string | null;
+  /** CallEnvoy's own test line, to pre-fill a first call. */
+  demo?: { number: string; business: string; goal: string; facts: string; menu_tips: string };
 };
 
 /** The place_call fields (the console form sends the same). */
@@ -135,7 +137,22 @@ export class ApiError extends Error {
 
 /** An agent key as listed; the full key is only in the answer to createKey. */
 export type ApiKey = { id: string; name: string; prefix: string; created_at: string; last_used_at: string | null; disabled: boolean };
-export type AuthMe = { signed_in: boolean; email: string | null; mail_ready: boolean };
+/** `first_run`: the user has no profile name yet (the console shows the welcome steps). */
+export type AuthMe = { signed_in: boolean; email: string | null; mail_ready: boolean; is_admin: boolean; signups_open: boolean; first_run: boolean };
+/** A user as the admin sees them: usage only. */
+export type AdminUser = {
+  id: string;
+  email: string;
+  name: string | null;
+  created_at: string;
+  last_seen_at: string | null;
+  disabled: boolean;
+  is_admin: boolean;
+  calls: number;
+  minutes: number;
+  minutes_today: number;
+  live_calls: number;
+};
 
 let onUnauthorized: () => void = () => {};
 
@@ -204,5 +221,9 @@ export const api = {
   createKey: (name: string) => request<ApiKey & { key: string }>('POST', '/api/keys', { name }),
   updateKey: (id: string, patch: { disabled?: boolean; name?: string }) => request<ApiKey>('PATCH', `/api/keys/${encodeURIComponent(id)}`, patch),
   deleteKey: (id: string) => request<unknown>('DELETE', `/api/keys/${encodeURIComponent(id)}`),
+  users: () => request<{ signups_open: boolean; users: AdminUser[] }>('GET', '/api/admin/users'),
+  updateUser: (id: string, disabled: boolean) => request<unknown>('PATCH', `/api/admin/users/${encodeURIComponent(id)}`, { disabled }),
+  removeUser: (id: string) => request<unknown>('DELETE', `/api/admin/users/${encodeURIComponent(id)}`),
+  setSignups: (open: boolean) => request<unknown>('PUT', '/api/admin/settings', { signups_open: open }),
 };
 

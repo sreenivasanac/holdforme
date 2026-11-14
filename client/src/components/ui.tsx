@@ -18,7 +18,7 @@ import {
 } from 'react-native';
 import type { Tone } from '../format';
 import { AlertBanner } from './AlertBanner';
-import { border, color, disabledOpacity, font, gateWidth, lineHeight, maxContent, meter, pressedOpacity, radius, space, useWide } from '../theme';
+import { border, color, disabledOpacity, font, gateWidth, lineHeight, maxContent, meter, pressedOpacity, radius, space, stepBadge, useWide } from '../theme';
 
 // react-native-web also reports hover and focus in the Pressable state.
 type PressState = PressableStateCallbackType & { hovered?: boolean };
@@ -27,7 +27,7 @@ type PressState = PressableStateCallbackType & { hovered?: boolean };
 export function Screen({ children, footer }: { children: ReactNode; footer?: ReactNode }) {
   const wide = useWide();
   const body = (
-    <ScrollView style={s.fill} contentContainerStyle={[s.main, wide && s.mainWide]}>
+    <ScrollView style={s.fill} contentContainerStyle={[s.main, wide && s.mainWide]} role="main">
       <AlertBanner />
       {children}
     </ScrollView>
@@ -78,18 +78,21 @@ export function Cell({ children }: { children: ReactNode }) {
 
 type TVariant = keyof typeof text;
 
+/** Text in a style variant. Heading variants are headings of their own level; `level` sets another level (a card title inside a section). */
 export function T({
   children,
   v = 'body',
   style,
   id,
+  level,
 }: {
   children: ReactNode;
   v?: TVariant;
   style?: StyleProp<TextStyle>;
   id?: string;
+  level?: 1 | 2 | 3;
 }) {
-  const heading = v === 'h1' ? 1 : v === 'h2' ? 2 : v === 'h3' ? 3 : undefined;
+  const heading = level ?? (v === 'hero' || v === 'h1' ? 1 : v === 'h2' ? 2 : v === 'h3' ? 3 : undefined);
   return (
     <Text
       nativeID={id}
@@ -183,6 +186,15 @@ export function Note({ kind, children, title }: { kind: NoteKind; children?: Rea
     <View style={[s.note, note[kind]]} role={role}>
       {title ? <Text style={[s.noteText, noteText[kind], s.bold, kind === 'blocked' && { color: color.err }]}>{title}</Text> : null}
       {typeof children === 'string' ? <Text style={[s.noteText, noteText[kind]]}>{children}</Text> : children}
+    </View>
+  );
+}
+
+/** The round number of a step (product page, welcome card); green when done. */
+export function StepNumber({ n, done }: { n: number; done?: boolean }) {
+  return (
+    <View style={[s.stepNo, done && s.stepNoDone]} aria-hidden>
+      <Text style={[s.stepNoText, done && s.stepNoTextDone]}>{n}</Text>
     </View>
   );
 }
@@ -384,6 +396,19 @@ export function CopyBlock({ code, name }: { code: string; name: string }) {
   );
 }
 
+/** Column titles above a list shown as a table on wide screens (`flex`: the width share of each column). */
+export function TableHead({ titles, flex }: { titles: readonly string[]; flex: readonly number[] }) {
+  return (
+    <View style={[s.tableRow, s.tableHead]} aria-hidden>
+      {titles.map((h, i) => (
+        <Text key={i} style={[s.tableHeadText, { flex: flex[i] }]}>
+          {h}
+        </Text>
+      ))}
+    </View>
+  );
+}
+
 /** On/off setting with a title and a short line of help. */
 export function SwitchRow({
   title,
@@ -420,10 +445,10 @@ export function SwitchRow({
   );
 }
 
-/** A labelled status line with something on the right (a pill or a small button). */
-export function StatusLine({ title, help, right }: { title: string; help?: string; right?: ReactNode }) {
+/** A labelled status line with something on the right (a pill or a small button). `first`: no rule above it. */
+export function StatusLine({ title, help, right, first }: { title: string; help?: string; right?: ReactNode; first?: boolean }) {
   return (
-    <View style={s.lineRow}>
+    <View style={[s.lineRow, first && s.lineFirst]}>
       <View style={s.fill}>
         <Text style={[text.body, s.semi]}>{title}</Text>
         {help ? <Text style={text.fine}>{help}</Text> : null}
@@ -468,6 +493,7 @@ export function AudioMeter({ level, label }: { level: number; label: string }) {
 }
 
 export const text = StyleSheet.create({
+  hero: { color: color.fg, fontSize: font.size.hero, fontWeight: font.weight.heavy, lineHeight: font.size.hero * font.heroLineHeight },
   h1: { color: color.fg, fontSize: font.size.h1, fontWeight: font.weight.bold, marginBottom: space.ml },
   h2: { color: color.fg, fontSize: font.size.h2, fontWeight: font.weight.bold, marginBottom: space.ml },
   h3: { color: color.fg, fontSize: font.size.h3, fontWeight: font.weight.bold },
@@ -513,6 +539,10 @@ const s = StyleSheet.create({
   bold: { fontWeight: font.weight.bold },
   semi: { fontWeight: font.weight.semi },
   steps: { gap: space.xxs, marginTop: space.s },
+  stepNo: { width: stepBadge, height: stepBadge, borderRadius: radius.pill, borderWidth: border.thin, borderColor: color.brand, backgroundColor: color.selected, alignItems: 'center', justifyContent: 'center' },
+  stepNoDone: { borderColor: color.ok, backgroundColor: color.ok },
+  stepNoText: { color: color.white, fontSize: font.size.m, fontWeight: font.weight.bold },
+  stepNoTextDone: { color: color.okInk },
   optional: { color: color.muted, fontWeight: font.weight.normal },
   fieldMsg: { marginTop: space.s },
   input: {
@@ -540,6 +570,10 @@ const s = StyleSheet.create({
   segText: { color: color.muted, fontSize: font.size.body, fontWeight: font.weight.semi, textAlign: 'center' },
   segTextOn: { color: color.white },
   lineRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space.l, paddingVertical: space.ml, borderTopWidth: border.thin, borderTopColor: color.line },
+  tableRow: { flexDirection: 'row', alignItems: 'center', gap: space.ml },
+  tableHead: { paddingHorizontal: space.xs, paddingBottom: space.sm, borderBottomWidth: border.thin, borderBottomColor: color.line },
+  tableHeadText: { color: color.muted, fontSize: font.size.s, fontWeight: font.weight.semi },
+  lineFirst: { borderTopWidth: 0, paddingTop: 0 },
   scrim: { flex: 1, backgroundColor: color.scrim, justifyContent: 'flex-end', padding: space.ml },
   scrimWide: { justifyContent: 'center', alignItems: 'center' },
   sheet: { width: '100%', backgroundColor: color.card, borderWidth: border.thin, borderColor: color.line, borderRadius: radius.xl, padding: space.xxl, gap: space.ml },

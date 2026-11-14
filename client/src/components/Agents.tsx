@@ -197,7 +197,7 @@ function NewKey({ onCancel, onCreated }: { onCancel: () => void; onCreated: (k: 
   };
   return (
     <View style={s.panel}>
-      <TextField label="Key name" value={name} onChangeText={setName} maxLength={NAME_MAX} error={error} autoFocus onSubmitEditing={create} help="The agent that uses this key." />
+      <TextField label="Key name" value={name} onChangeText={setName} maxLength={NAME_MAX} error={error} autoFocus onSubmitEditing={create} help={`The agent that uses this key. At most ${NAME_MAX} characters (${name.length}/${NAME_MAX}).`} />
       <View style={s.actions} role="group" aria-label="Suggested names">
         {SUGGESTIONS.map((x) => (
           <Button key={x} label={x} a11yLabel={`Name it ${x}`} kind="secondary" size="small" pressed={name === x} onPress={() => setName(x)} />

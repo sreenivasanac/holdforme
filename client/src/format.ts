@@ -29,6 +29,12 @@ export function when(iso: string, now = new Date()) {
   return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time(d)}`;
 }
 
+/** "Nov 7", or "Nov 7, 2025" in another year. */
+export function day(iso: string, now = new Date()) {
+  const d = new Date(iso);
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric', ...(d.getFullYear() !== now.getFullYear() ? { year: 'numeric' } : {}) });
+}
+
 export function clock(iso: string) {
   return time(new Date(iso));
 }

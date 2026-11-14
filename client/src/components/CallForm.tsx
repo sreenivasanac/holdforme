@@ -3,10 +3,10 @@ import { useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { api, ApiError, type Config, type Mode, type NewCall, type Settings } from '../api';
 import { phone, toE164 } from '../format';
-import { useCallerId } from '../hooks';
-import { space, useWide } from '../theme';
+import { useCallerId, useGo } from '../hooks';
+import { color, space, useWide } from '../theme';
 import { CallOptions, checkNumbers, MODE_OPTIONS, type Options } from './CallOptions';
-import { Button, Card, Note, Segmented, Stack, T, TextField, text } from './ui';
+import { Button, Card, Note, Segmented, Stack, T, TextField, TextLink, text } from './ui';
 import { VoicePicker } from './VoicePicker';
 
 type Errors = Partial<Record<keyof NewCall | keyof Options | 'form', string>>;
@@ -15,16 +15,19 @@ type Errors = Partial<Record<keyof NewCall | keyof Options | 'form', string>>;
 // The server's field names for the two options whose settings name differs.
 const TO_SETTING: Record<string, keyof Options> = { record: 'record_calls', from: 'caller_id' };
 
-export function CallForm({ config, settings }: { config: Config; settings: Settings }) {
+/** `demo`: CallEnvoy's demo line, filled in for a first call. */
+export function CallForm({ config, settings, demo }: { config: Config; settings: Settings; demo?: Config['demo'] }) {
   const wide = useWide();
+  const go = useGo();
+  const named = !!settings.name; // the server refuses a call without the profile name
   const callerId = useCallerId();
   const ownVerified = !!callerId?.verified && !!callerId.number && callerId.number === settings.callback_number;
   const [f, setF] = useState({
-    to: '',
-    business: '',
-    goal: '',
-    facts: '',
-    menu_tips: '',
+    to: demo ? phone(demo.number) : '',
+    business: demo?.business ?? '',
+    goal: demo?.goal ?? '',
+    facts: demo?.facts ?? '',
+    menu_tips: demo?.menu_tips ?? '',
     flexibility: '',
     on_behalf_of: '',
     connect_when: '',
@@ -51,6 +54,7 @@ export function CallForm({ config, settings }: { config: Config; settings: Setti
   const needsPhone = f.reach === 'phone' && (f.mode === 'transfer' || !!f.connect_when.trim() || f.listen_in);
 
   const submit = async () => {
+    if (!named) return;
     const { n, errors: e } = checkNumbers(f, config.ranges, ['alert_wait_seconds', 'max_minutes']) as { n: Record<string, number>; errors: Errors };
     const to = toE164(f.to);
     if (!to) e.to = 'Enter a US or Canada number with area code, like (503) 555-0142.';
@@ -111,8 +115,18 @@ export function CallForm({ config, settings }: { config: Config; settings: Setti
           <T v="h2">New call</T>
           <T v="muted">Every option starts from your Settings.</T>
         </View>
+        {!named && (
+          <Note kind="blocked" title="Add your name first.">
+            <T v="base" style={s.blockedText}>
+              The AI says it is calling on behalf of you, so it needs your name.
+            </T>
+            <TextLink label="Set your name" onPress={() => go('/settings?focus=name')} />
+          </Note>
+        )}
+        {demo && (
+          <Note kind="hint">This is CallEnvoy's demo line: a test phone line that answers like a business, with a menu and a short hold. Press Call now to try it.</Note>
+        )}
         {count > 0 && <Note kind="errsum">{`Fix ${count} field${count > 1 ? 's' : ''} to place the call.`}</Note>}
-        {errors.form && <Note kind="errsum">{errors.form}</Note>}
         <TextField
           label="Number to call"
           value={f.to}
@@ -208,8 +222,9 @@ export function CallForm({ config, settings }: { config: Config; settings: Setti
           </Stack>
         )}
 
+        {errors.form && <Note kind="errsum">{errors.form}</Note>}
         <View style={[s.foot, wide && s.footWide]}>
-          <Button label={busy ? 'Calling...' : 'Call now'} size="big" busy={busy} onPress={submit} full={!wide} />
+          <Button label={busy ? 'Calling...' : 'Call now'} size="big" busy={busy} disabled={!named} onPress={submit} full={!wide} />
           <T v="fine">The number is dialed right away.</T>
         </View>
       </Stack>
@@ -220,4 +235,5 @@ export function CallForm({ config, settings }: { config: Config; settings: Setti
 const s = StyleSheet.create({
   foot: { gap: space.l },
   footWide: { flexDirection: 'row', alignItems: 'center' },
+  blockedText: { color: color.blockedInk },
 });

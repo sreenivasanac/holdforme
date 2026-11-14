@@ -83,16 +83,17 @@ export function CallRecording({ call }: { call: Call }) {
   return <TranscriptLog call={call} top={note} />;
 }
 
-function PlayerTranscript({ call, url, seconds }: { call: Call; url: string; seconds: number }) {
+/** The recording player above the transcript, in one card. */
+export function PlayerTranscript({ call, url, seconds, level }: { call: Call; url: string; seconds: number; level?: 3 }) {
   const player = usePlayer(url, seconds);
-  return <TranscriptLog call={call} title="Recording and transcript" player={player} top={<RecordingPlayer player={player} url={url} />} />;
+  return <TranscriptLog call={call} title="Recording and transcript" player={player} top={<RecordingPlayer player={player} url={url} />} level={level} />;
 }
 
 /**
  * Transcript. Live: keeps the scroll position unless the reader is at the bottom.
  * With a player: lines with `at` jump there, and the playing line is highlighted and kept in view.
  */
-export function TranscriptLog({ call, title, player, top }: { call: Call; title?: string; player?: PlayerControl; top?: ReactNode }) {
+export function TranscriptLog({ call, title, player, top, level }: { call: Call; title?: string; player?: PlayerControl; top?: ReactNode; level?: 3 }) {
   const lines = useMemo(() => mergeLines(call.transcript ?? []), [call.transcript]);
   const ref = useRef<ScrollViewInstance>(null);
   const atBottom = useRef(true);
@@ -118,7 +119,7 @@ export function TranscriptLog({ call, title, player, top }: { call: Call; title?
   return (
     <Card label={heading}>
       <View style={s.cardHead}>
-        <T v="h2" style={s.h2}>
+        <T v="h2" style={s.h2} level={level}>
           {heading}
         </T>
         {call.finished ? (
@@ -232,14 +233,16 @@ export function QuestionBox({ callId, q }: { callId: string; q: Question }) {
   );
 }
 
-export function OutcomeCard({ call }: { call: Call }) {
+export function OutcomeCard({ call, level }: { call: Call; level?: 3 }) {
   const st = statusLabel(call);
   const o = call.outcome;
   const details = Object.entries(o?.details ?? {}).filter(([, v]) => v != null && v !== '');
   if (call.owner_seconds) details.push(['you_on_the_call', duration(call.owner_seconds)]);
   return (
     <Card label="Outcome">
-      <T v="h2">Outcome</T>
+      <T v="h2" level={level}>
+        Outcome
+      </T>
       <View style={[s.inline, s.result]}>
         <Pill label={st.text} tone={st.tone} />
         <T v="muted">{o ? RESULT_TEXT[o.result] ?? '' : call.status === 'failed' ? 'The call did not go through' : 'Ended without an outcome'}</T>

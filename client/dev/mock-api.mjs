@@ -1,13 +1,16 @@
-// Dev-only mock of the CallEnvoy console API (plan sections 4, 4a, 10a, 22; round 2 A1-A4) with sample calls.
+// Dev-only mock of the CallEnvoy console API (plan sections 4, 4a, 10a, 22; round 2 A1-A4; round 3 A1-A5b) with sample calls.
 // Not part of the export. Serves client/dist under /callenvoy too, so the real export can be checked.
-//   node dev/mock-api.mjs            -> http://localhost:3020/callenvoy/   (owner email: dana@example.com, agent key: dev-key)
-//   GET  /__mock/signin                 signs this browser in (sets the session cookie) and opens the console
+//   node dev/mock-api.mjs            -> http://localhost:3020/callenvoy/   (admin: dana@example.com, agent key: dev-key)
+// Users: dana@example.com (admin, sample calls and keys), sam@example.com (new: no name, no calls, no keys),
+// and a disabled user. Any other address can sign up while sign-ups are on (the link is printed here).
+//   GET  /__mock/signin?as=dana|sam     signs this browser in as that user (sets the session cookie) and opens the console
 //   GET  /__mock/last-link              the last emailed sign-in link (also printed on the console)
 //   POST /__mock/mail?ready=0|1         email sign-in configured or not (GET /api/auth/me mail_ready)
 //   POST /__mock/expire                 ends every session (the next request gets 401 session_expired)
 //   POST /__mock/recording?fail=1|0     /r/demo answers 404 (to see the player's error state)
 //   POST /__mock/recording?unknown=1|0  the call view gives duration_seconds 0 (length not known)
-//   POST /__mock/calls?set=empty|many  switches the call list
+//   POST /__mock/calls?set=empty|many&as=dana|sam   switches that user's call list
+//   POST /__mock/admin?fail=1|0          GET /api/admin/users answers 500 (to see the People error state)
 //   POST /__mock/socket?id=<call>&send=replaced|error|drop   acts on that call's open audio socket
 //   POST /__mock/alert?id=<call>&state=alerting|none&seconds=20   starts or ends an alert (a new alert_until each time)
 //   GET  /__mock/count?id=<call>                           how often GET /api/calls/<id> was asked
@@ -19,7 +22,7 @@ import path from 'node:path';
 const PORT = Number(process.env.PORT ?? 3020);
 const DIST = path.resolve(import.meta.dirname, '../dist');
 const VOICE_DIR = path.resolve(import.meta.dirname, '../../callenvoy/static/voices');
-const OWNER_EMAIL = 'dana@example.com';
+const OWNER_EMAIL = 'dana@example.com'; // the admin (OWNER_EMAIL on the server)
 const iso = (msAgo) => new Date(Date.now() - msAgo).toISOString();
 const MIN = 60_000;
 
@@ -36,21 +39,25 @@ const VOICES = [
   ['Meera', 'female', 'Indian English', 'friendly, professional, middle-aged'],
 ].map(([name, gender, accent, style]) => ({ name, gender, accent, style, sample_url: `/callenvoy/static/voices/${name.toLowerCase()}.mp3`, default: name === 'Hannah' }));
 
-const profile = {
-  name: 'Dana Reyes', callback_number: '+15035550142', details: 'Home address: 1820 SE Alder St, Apt 4, Portland OR 97214',
+const newProfile = (over = {}) => ({
+  name: null, callback_number: null, details: null,
   voice: 'Hannah', record_calls: true, max_minutes: 30, mode: 'handle', reach: 'app_then_phone', alert_wait_seconds: 20,
   phone_ring_seconds: 25, no_answer: 'ai_handles', alert_on_human: true, listen_in: false, alert_sound: true,
   alert_notification: true, alert_push: true, push_shows_business: true, caller_id: 'callenvoy', leave_voicemail: true,
-  name_pronunciation: null, assistant_name: null, email: 'dana@example.com', address: null, date_of_birth: null,
+  name_pronunciation: null, assistant_name: null, email: null, address: null, date_of_birth: null,
   insurance_carrier: null, insurance_member_id: null, insurance_group_number: null, dental_insurance_carrier: null,
   dental_insurance_member_id: null, vehicle: null, vin: null, frequent_flyer_numbers: null, known_traveler_number: null, redress_number: null,
-};
+  ...over,
+});
 // As the server's config.SETTINGS: text fields with their max length, int fields with their range.
 const TEXT_LIMITS = { name: 80, details: 3000, name_pronunciation: 80, assistant_name: 30, email: 120, address: 300, date_of_birth: 40,
   insurance_carrier: 80, insurance_member_id: 60, insurance_group_number: 60, dental_insurance_carrier: 80, dental_insurance_member_id: 60,
   vehicle: 120, vin: 40, frequent_flyer_numbers: 300, known_traveler_number: 40, redress_number: 40 };
 const RANGES = { max_minutes: [1, 120], alert_wait_seconds: [5, 120], phone_ring_seconds: [10, 60] };
-let verifiedAt = 0; // caller ID: verified 10 s after Verify
+// As config.py: CallEnvoy's demo line, to pre-fill a first call (round 3 A5b).
+const DEMO = { number: '+16562405137', business: 'Northstar Internet', goal: 'Ask billing to remove a wrong charge of 30 dollars on the October bill and get a reference number.',
+  facts: 'Service address: 12 Oak Street, Springfield.', menu_tips: 'Billing is option 1.' };
+const DAILY_MINUTE_CAP = 240;
 
 const line = (n, sAgo, who, text) => ({ n, t: iso(sAgo * 1000), who, text, at: null });
 // The demo recording: the voice samples (CBR 128 kb/s mp3 frames) one after the other, twice: about 2 minutes.
@@ -132,7 +139,6 @@ function sampleCalls() {
       created_at: iso(MIN), talk_seconds: 60, goal: '', calling_number: null }),
   ];
 }
-let calls = sampleCalls();
 let alertStart = Date.now();
 let alertLen = 20_000;
 
@@ -155,6 +161,41 @@ function live(c) {
   return c;
 }
 
+// ---- Users: each has their own calls, keys, profile and caller-ID state ----
+const ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz'; // no look-alike characters
+const newKey = () => 'ce_live_' + Array.from(crypto.randomBytes(32), (b) => ALPHABET[b % ALPHABET.length]).join('');
+const withPrefix = (k) => ({ ...k, prefix: k.key.slice(0, 12) });
+const DAY = 24 * 60 * MIN;
+const newUser = (id, email, over = {}) => ({ id, email, created_at: iso(0), last_seen_at: iso(0), disabled: false, calls: [], keys: [], profile: newProfile(), verifiedAt: 0, ...over });
+const users = [
+  newUser('u_dana', OWNER_EMAIL, {
+    created_at: iso(40 * DAY), last_seen_at: iso(2 * MIN), calls: sampleCalls(),
+    profile: newProfile({ name: 'Dana Reyes', callback_number: '+15035550142', details: 'Home address: 1820 SE Alder St, Apt 4, Portland OR 97214', email: OWNER_EMAIL }),
+    keys: [
+      { id: 'k_env', name: 'First key (.env)', key: 'dev-key', created_at: iso(30 * DAY), last_used_at: iso(2 * DAY), disabled: false },
+      { id: 'k_old', name: 'Old laptop, Claude Desktop with a long name', key: newKey(), created_at: iso(9 * DAY), last_used_at: null, disabled: true },
+    ].map(withPrefix),
+  }),
+  newUser('u_sam', 'sam@example.com', { created_at: iso(3 * DAY), last_seen_at: iso(3 * DAY) }),
+  newUser('u_long', 'alexandra.konstantinopoulou-whitfield@longdomain-example.org', {
+    created_at: iso(12 * DAY), last_seen_at: iso(6 * DAY), disabled: true, profile: newProfile({ name: 'Alexandra Konstantinopoulou-Whitfield' }),
+    calls: [base('c_l1', { status: 'completed', phase: null, finished: true, created_at: iso(7 * DAY), ended_at: iso(7 * DAY - 400_000), talk_seconds: 400 })],
+  }),
+];
+const userByEmail = (email) => users.find((u) => u.email === email.toLowerCase());
+const callById = (id) => users.flatMap((u) => u.calls).find((c) => c.id === id);
+const verified = (u) => !!u.verifiedAt && Date.now() > u.verifiedAt; // caller ID: verified 10 s after Verify
+let signupsOpen = true;
+let adminFails = false;
+const isToday = (iso) => new Date(iso).toDateString() === new Date().toDateString();
+const minutes = (calls) => Math.round(calls.reduce((n, c) => n + (c.talk_seconds ?? 0), 0) / 60);
+/** As GET /api/admin/users: usage only, no call content. */
+const usage = (u) => ({
+  id: u.id, email: u.email, name: u.profile.name, created_at: u.created_at, last_seen_at: u.last_seen_at, disabled: u.disabled,
+  is_admin: u.email === OWNER_EMAIL, calls: u.calls.length, minutes: minutes(u.calls), minutes_today: minutes(u.calls.filter((c) => isToday(c.created_at))),
+  live_calls: u.calls.filter((c) => !c.finished).length,
+});
+
 const send = (res, status, body) => {
   res.writeHead(status, { 'content-type': 'application/json', 'access-control-allow-origin': 'http://localhost:8081', 'access-control-allow-headers': 'authorization, content-type', 'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE' });
   res.end(body === undefined ? '' : JSON.stringify(body));
@@ -162,63 +203,73 @@ const send = (res, status, body) => {
 const readBody = (req) => new Promise((ok) => { let d = ''; req.on('data', (c) => (d += c)); req.on('end', () => { try { ok(JSON.parse(d || '{}')); } catch { ok({}); } }); });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const cookie = (req, name) => (req.headers.cookie ?? '').split(/;\s*/).find((c) => c.startsWith(`${name}=`))?.slice(name.length + 1) ?? null;
-const sessions = new Set(); // session ids (the server stores them hashed)
-const linkTokens = new Map(); // token -> expiry ms (one use)
-const linkRequests = []; // times of POST /api/auth/request, for the 5 per hour limit
+const sessions = new Map(); // session id (the server stores it hashed) -> user id
+const linkTokens = new Map(); // token -> { email, until } (one use, bound to one address)
+const linkRequests = []; // [time, address] of POST /api/auth/request, for the rate limits
 let mailReady = true;
 let lastLink = null;
-const newSession = (res) => {
+const newSession = (res, u) => {
   const sid = crypto.randomBytes(24).toString('hex');
-  sessions.add(sid);
+  sessions.set(sid, u.id);
+  u.last_seen_at = iso(0);
   res.setHeader('set-cookie', `ce_session=${sid}; HttpOnly; SameSite=Strict; Path=/callenvoy; Max-Age=${30 * 86400}`);
 };
-const ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz'; // no look-alike characters
-const newKey = () => 'ce_live_' + Array.from(crypto.randomBytes(32), (b) => ALPHABET[b % ALPHABET.length]).join('');
-const keys = [
-  { id: 'k_env', name: 'First key (.env)', key: 'dev-key', prefix: 'dev-key', created_at: iso(30 * 24 * 60 * MIN), last_used_at: iso(2 * 24 * 60 * MIN), disabled: false },
-  { id: 'k_old', name: 'Old laptop, Claude Desktop with a long name', key: newKey(), created_at: iso(9 * 24 * 60 * MIN), last_used_at: null, disabled: true },
-].map((k) => ({ ...k, prefix: k.key.slice(0, 12) }));
-const keyView = ({ key, ...k }) => k;
-/** 'owner', 'agent', or the 401 code. */
+const sessionUser = (req) => users.find((u) => u.id === sessions.get(cookie(req, 'ce_session'))) ?? null;
+/** { user, kind: 'owner' | 'agent' }, or the 401 code. */
 function credential(req) {
   const sid = cookie(req, 'ce_session');
-  if (sid && sessions.has(sid)) return 'owner';
+  const su = sessionUser(req);
+  if (su) return su.disabled ? 'account_disabled' : { user: su, kind: 'owner' };
   const h = req.headers.authorization;
   if (!h) return sid ? 'session_expired' : 'no_credential';
-  const k = keys.find((x) => x.key === h.replace(/^(Bearer\s+)+/i, '').trim());
+  const token = h.replace(/^(Bearer\s+)+/i, '').trim();
+  const user = users.find((u) => u.keys.some((x) => x.key === token));
+  const k = user?.keys.find((x) => x.key === token);
   if (!k) return 'bad_key';
   if (k.disabled) return 'key_disabled';
+  if (user.disabled) return 'account_disabled';
   if (!k.last_used_at || Date.now() - Date.parse(k.last_used_at) > MIN) k.last_used_at = iso(0); // at most once a minute
-  return 'agent';
+  return { user, kind: 'agent' };
 }
-const ERRORS = { no_credential: 'Sign in or send an API key.', session_expired: 'Your session has ended. Sign in again.', bad_key: 'Unknown API key.', key_disabled: 'This API key is disabled.' };
+const ERRORS = { no_credential: 'Sign in or send an API key.', session_expired: 'Your session has ended. Sign in again.', bad_key: 'Unknown API key.', key_disabled: 'This API key is disabled.',
+  account_disabled: 'This account is disabled.' };
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 async function auth(req, res, p) {
   if (p === '/api/auth/me') {
-    const sid = cookie(req, 'ce_session');
-    return send(res, 200, { signed_in: !!sid && sessions.has(sid), email: sid && sessions.has(sid) ? OWNER_EMAIL : null, mail_ready: mailReady });
+    const u = sessionUser(req);
+    const on = !!u && !u.disabled;
+    return send(res, 200, { signed_in: on, email: on ? u.email : null, mail_ready: mailReady, is_admin: on && u.email === OWNER_EMAIL, signups_open: signupsOpen, first_run: on && !u.profile.name });
   }
   if (p === '/api/auth/request' && req.method === 'POST') {
-    const b = await readBody(req);
-    const hour = Date.now() - 60 * MIN;
-    while (linkRequests.length && linkRequests[0] < hour) linkRequests.shift();
-    if (linkRequests.length >= 5) return send(res, 429, { error: 'Too many sign-in requests. Try again in an hour.', code: 'rate_limited' });
-    linkRequests.push(Date.now());
-    if (mailReady && String(b.email ?? '').toLowerCase() === OWNER_EMAIL) {
+    const email = String((await readBody(req)).email ?? '').trim().toLowerCase();
+    if (!EMAIL_RE.test(email)) return send(res, 400, { error: 'Enter a valid email address.', code: 'bad_email' });
+    const u = userByEmail(email);
+    if (u?.disabled) return send(res, 403, { error: 'This account is disabled.', code: 'account_disabled' });
+    if (!u && !signupsOpen) return send(res, 403, { error: 'New accounts are closed right now.', code: 'signups_closed' });
+    // As config.py: 3 per address per hour, 60 per day in total (the mock has one client IP, so no IP limit).
+    while (linkRequests.length && linkRequests[0][0] < Date.now() - DAY) linkRequests.shift();
+    if (linkRequests.length >= 60 || linkRequests.filter(([t, a]) => a === email && t > Date.now() - 60 * MIN).length >= 3)
+      return send(res, 429, { error: 'Too many sign-in requests. Try again later.', code: 'rate_limited' });
+    linkRequests.push([Date.now(), email]);
+    if (mailReady) {
       const t = crypto.randomBytes(24).toString('hex');
-      linkTokens.set(t, Date.now() + 15 * MIN);
+      linkTokens.set(t, { email, until: Date.now() + 15 * MIN });
       lastLink = `http://localhost:${PORT}/callenvoy/signin?token=${t}`;
-      console.log(`sign-in link for ${OWNER_EMAIL}: ${lastLink}`);
+      console.log(`sign-in link for ${email}: ${lastLink}`);
     }
     return send(res, 200, { ok: true });
   }
   if (p === '/api/auth/verify' && req.method === 'POST') {
     const { token } = await readBody(req);
-    const until = linkTokens.get(token);
+    const link = linkTokens.get(token);
     linkTokens.delete(token);
-    if (!until || until < Date.now()) return send(res, 400, { error: 'This sign-in link was used or has expired.', code: 'bad_link' });
-    newSession(res);
-    return send(res, 200, { ok: true, email: OWNER_EMAIL });
+    if (!link || link.until < Date.now()) return send(res, 400, { error: 'This sign-in link was used or has expired.', code: 'bad_link' });
+    let u = userByEmail(link.email);
+    if (u?.disabled) return send(res, 403, { error: 'This account is disabled.', code: 'account_disabled' });
+    if (!u) users.push((u = newUser(`u_${crypto.randomBytes(4).toString('hex')}`, link.email))); // the account starts at the first sign-in
+    newSession(res, u);
+    return send(res, 200, { ok: true, email: u.email });
   }
   if (p === '/api/auth/sign-out' && req.method === 'POST') {
     sessions.delete(cookie(req, 'ce_session'));
@@ -228,7 +279,44 @@ async function auth(req, res, p) {
   return send(res, 404, { detail: 'Not found' });
 }
 
-async function keyRoutes(req, res, p) {
+/** Admin routes (round 3 A4): 404 for everyone but the admin; usage only. */
+async function adminRoutes(req, res, p, me) {
+  if (me.email !== OWNER_EMAIL) return send(res, 404, { detail: 'Not found' });
+  const m = req.method;
+  if (p === '/api/admin/users' && m === 'GET') {
+    if (adminFails) return send(res, 500, { detail: 'The user list could not be loaded.' });
+    return send(res, 200, { signups_open: signupsOpen, users: users.map(usage) });
+  }
+  if (p === '/api/admin/settings' && m === 'PUT') {
+    const b = await readBody(req);
+    if (typeof b.signups_open !== 'boolean') return send(res, 400, { detail: 'signups_open must be true or false.', field: 'signups_open' });
+    signupsOpen = b.signups_open;
+    return send(res, 200, { signups_open: signupsOpen });
+  }
+  const u = users.find((x) => x.id === /^\/api\/admin\/users\/([^/]+)$/.exec(p)?.[1]);
+  if (!u) return send(res, 404, { detail: 'No user with that id.' });
+  if (u === me) return send(res, 400, { detail: 'You cannot disable or remove your own account.' });
+  // Live calls of that user are hung up first.
+  const hangUpAll = () => u.calls.filter((c) => !c.finished).forEach((c) => Object.assign(c, { finished: true, status: 'canceled', phase: null, ended_at: iso(0) }));
+  if (m === 'PATCH') {
+    const b = await readBody(req);
+    if (typeof b.disabled !== 'boolean') return send(res, 400, { detail: 'disabled must be true or false.', field: 'disabled' });
+    u.disabled = b.disabled;
+    if (u.disabled) hangUpAll();
+    return send(res, 200, usage(u));
+  }
+  if (m === 'DELETE') {
+    hangUpAll();
+    users.splice(users.indexOf(u), 1);
+    for (const [sid, id] of sessions) if (id === u.id) sessions.delete(sid);
+    return send(res, 204);
+  }
+  return send(res, 404, { detail: 'Not found' });
+}
+
+const keyView = ({ key, ...k }) => k;
+
+async function keyRoutes(req, res, p, { keys }) {
   const m = req.method;
   if (p === '/api/keys' && m === 'GET') return send(res, 200, { keys: keys.map(keyView) });
   if (p === '/api/keys' && m === 'POST') {
@@ -282,17 +370,21 @@ const counts = {}; // call id -> GET /api/calls/<id> requests
 
 async function api(req, res, p, q) {
   if (p.startsWith('/api/auth/')) return auth(req, res, p);
-  const who = credential(req);
-  if (who !== 'owner' && who !== 'agent') return send(res, 401, { error: ERRORS[who], code: who });
-  // As the server: keys, push and the audio ticket (it lets its holder hear and speak on a call) are for the owner only.
-  const ownerOnly = p.startsWith('/api/keys') || p.startsWith('/api/push/') || p.endsWith('/audio-ticket');
+  const cred = credential(req);
+  if (typeof cred === 'string') return send(res, 401, { error: ERRORS[cred], code: cred });
+  const { user: u, kind: who } = cred;
+  const { profile, calls } = u;
+  // As the server: keys, push, admin and the audio ticket (it lets its holder hear and speak on a call) need a console session.
+  const ownerOnly = p.startsWith('/api/keys') || p.startsWith('/api/push/') || p.startsWith('/api/admin/') || p.endsWith('/audio-ticket');
   if (who === 'agent' && ownerOnly) return send(res, 403, { error: 'agent keys cannot use this; sign in to the console', code: 'owner_only' });
   const origin = req.headers.origin;
   if (who === 'owner' && req.method !== 'GET' && origin && origin !== `http://localhost:${PORT}`) return send(res, 403, { detail: 'Wrong origin.' });
-  if (p.startsWith('/api/keys')) return keyRoutes(req, res, p);
+  if (p.startsWith('/api/keys')) return keyRoutes(req, res, p, u);
+  if (p.startsWith('/api/admin/')) return adminRoutes(req, res, p, u);
   const m = req.method;
-  if (p === '/api/config') return send(res, 200, { app_name: 'CallEnvoy', mcp_url: 'https://pragnyalabs.com/callenvoy/mcp', voices: VOICES,
-    limits: { max_call_minutes: 120, max_concurrent_calls: 2, daily_minute_cap: 240, minutes_used_today: 34 },
+  if (p === '/api/config') return send(res, 200, { app_name: 'CallEnvoy', mcp_url: 'https://pragnyalabs.com/callenvoy/mcp', voices: VOICES, demo: DEMO,
+    limits: { max_call_minutes: 120, max_concurrent_calls: 2, daily_minute_cap: DAILY_MINUTE_CAP, // As the server: the service's minutes today (the shared cap), and this user's own.
+      minutes_used_today: users.reduce((n, x) => n + usage(x).minutes_today, 0), my_minutes_today: minutes(calls.filter((c) => isToday(c.created_at))) },
     defaults: Object.fromEntries(Object.keys(profile).map((k) => [k, null])), // not used by the console
     choices: { caller_id: ['callenvoy', 'own'], mode: ['handle', 'transfer'], reach: ['app', 'phone', 'app_then_phone'], no_answer: ['ai_handles', 'end_politely'] },
     ranges: RANGES, text_limits: TEXT_LIMITS, vapid_public_key: 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U' });
@@ -300,17 +392,17 @@ async function api(req, res, p, q) {
   if (p === '/api/profile' && m === 'PUT') {
     const b = await readBody(req);
     if (b.max_minutes != null && (b.max_minutes < 1 || b.max_minutes > 120)) return send(res, 400, { detail: 'max_minutes must be 1-120.', field: 'max_minutes' });
-    if (b.caller_id === 'own' && !(verifiedAt && Date.now() > verifiedAt)) return send(res, 400, { detail: 'Verify your callback number before you use it as caller ID.', field: 'caller_id' });
+    if (b.caller_id === 'own' && !verified(u)) return send(res, 400, { detail: 'Verify your callback number before you use it as caller ID.', field: 'caller_id' });
     for (const [k, v] of Object.entries(b)) if (TEXT_LIMITS[k] && typeof v === 'string' && v.length > TEXT_LIMITS[k]) return send(res, 400, { detail: `At most ${TEXT_LIMITS[k]} characters.`, field: k });
     if (/^x+$/i.test(b.vin ?? '')) return send(res, 400, { detail: 'That is not a VIN.', field: 'vin' }); // to see a field error inside a closed group
     // As save_profile: null is skipped, "" clears the field.
     for (const [k, v] of Object.entries(b)) if (v !== null && k in profile) profile[k] = v === '' ? null : v;
     return send(res, 200, profile);
   }
-  if (p === '/api/caller-id') return send(res, 200, { number: profile.callback_number || null, verified: !!verifiedAt && Date.now() > verifiedAt });
+  if (p === '/api/caller-id') return send(res, 200, { number: profile.callback_number || null, verified: verified(u) });
   if (p === '/api/caller-id/verify') {
-    if (verifiedAt && Date.now() > verifiedAt) return send(res, 200, { validation_code: null }); // already verified with Twilio
-    verifiedAt = Date.now() + 10_000;
+    if (verified(u)) return send(res, 200, { validation_code: null }); // already verified with Twilio
+    u.verifiedAt = Date.now() + 10_000;
     return send(res, 200, { validation_code: '482913' });
   }
   if (p === '/api/push/test') return send(res, 200, { sent: 2 });
@@ -318,11 +410,14 @@ async function api(req, res, p, q) {
   if (p === '/api/calls' && m === 'GET') return send(res, 200, calls.map((c) => ({ ...live(c), transcript: undefined })));
   if (p === '/api/calls' && m === 'POST') {
     const b = await readBody(req);
-    if (/limit/i.test(b.goal ?? '')) return send(res, 429, { detail: 'The daily limit of 240 call minutes is reached. Try again tomorrow.' });
+    if (!profile.name) return send(res, 400, { detail: 'Set your name first (Settings, or callenvoy_save_profile): the AI says who it calls for.' });
+    // Shared service limits: the message says nothing about other users.
+    if (/limit/i.test(b.goal ?? '')) return send(res, 429, { error: "The service's daily limit of call minutes is reached. Try again tomorrow.", code: 'daily_limit' });
+    if (/busy/i.test(b.goal ?? '')) return send(res, 429, { error: 'The service is busy with other calls. Try again in a few minutes.', code: 'service_busy' });
     if (b.reach === 'phone' && b.mode === 'transfer' && !profile.callback_number) return send(res, 400, { detail: 'Transfer by phone needs a callback number. Add one in Settings, or choose App.', field: 'reach' });
     const id = `c_${crypto.randomBytes(4).toString('hex')}`;
     calls.unshift(base(id, { ...b, number: b.to, status: 'queued', phase: null, created_at: iso(0), placedAt: Date.now(), recorded: b.record ?? true,
-      calling_number: b.from === 'own' ? profile.callback_number : '+19186021019', transcript: [line(0, 0, 'event', `Dialing ${b.to}`)] }));
+      calling_number: b.from === 'own' && b.to !== DEMO.number ? profile.callback_number : '+19186021019', /* the demo line answers only the CallEnvoy number */ transcript: [line(0, 0, 'event', `Dialing ${b.to}`)] }));
     return send(res, 200, { id });
   }
   const cm = /^\/api\/calls\/([^/]+)(?:\/([a-z-]+))?$/.exec(p);
@@ -349,7 +444,7 @@ async function api(req, res, p, q) {
 // Minimal WebSocket for /callenvoy/audio/<id>: state messages and a 440 Hz tone as call audio.
 function audioSocket(req, socket) {
   const id = decodeURIComponent(req.url.split('/').pop());
-  const c = calls.find((x) => x.id === id);
+  const c = callById(id);
   const accept = crypto.createHash('sha1').update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
   socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
   const frame = (op, data) => { const len = data.length; const head = len < 126 ? Buffer.from([0x80 | op, len]) : Buffer.from([0x80 | op, 126, len >> 8, len & 255]); socket.write(Buffer.concat([head, data])); };
@@ -405,13 +500,13 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, { ok: true });
   }
   if (url.pathname === '/__mock/alert') {
-    const c = calls.find((x) => x.id === url.searchParams.get('id')); if (!c) return send(res, 404, {});
+    const c = callById(url.searchParams.get('id')); if (!c) return send(res, 404, {});
     const on = url.searchParams.get('state') === 'alerting'; alertStart = Date.now(); alertLen = 1000 * Number(url.searchParams.get('seconds') ?? 20);
     c.owner = { state: on ? 'alerting' : 'none', via: on ? 'app' : null, alert_until: null, unreachable: false };
     return send(res, 200, { ok: true });
   }
   if (url.pathname === '/__mock/signin') {
-    newSession(res);
+    newSession(res, userByEmail(`${url.searchParams.get('as') ?? 'dana'}@example.com`) ?? users[0]);
     res.writeHead(302, { location: '/callenvoy/' });
     return res.end();
   }
@@ -421,11 +516,15 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/__mock/recording') {
     const q = url.searchParams;
     if (q.has('fail')) recordingFails = q.get('fail') === '1';
-    if (q.has('unknown')) for (const c of calls) for (const r of c.recordings ?? []) r.duration_seconds = q.get('unknown') === '1' ? 0 : RECORDING_SECONDS;
+    if (q.has('unknown')) for (const c of users.flatMap((u) => u.calls)) for (const r of c.recordings ?? []) r.duration_seconds = q.get('unknown') === '1' ? 0 : RECORDING_SECONDS;
     return send(res, 200, { fail: recordingFails });
   }
   if (url.pathname === '/__mock/count') return send(res, 200, { count: counts[url.searchParams.get('id')] ?? 0 });
-  if (url.pathname === '/__mock/calls') { const set = url.searchParams.get('set'); calls = set === 'empty' ? [] : sampleCalls(); return send(res, 200, { calls: calls.length }); }
+  if (url.pathname === '/__mock/calls') {
+    const u = userByEmail(`${url.searchParams.get('as') ?? 'dana'}@example.com`); if (!u) return send(res, 404, {});
+    u.calls = url.searchParams.get('set') === 'empty' ? [] : sampleCalls(); return send(res, 200, { calls: u.calls.length });
+  }
+  if (url.pathname === '/__mock/admin') { adminFails = url.searchParams.get('fail') === '1'; return send(res, 200, { fail: adminFails }); }
   if (!url.pathname.startsWith('/callenvoy')) return send(res, 404, { detail: 'Not found' });
   const p = url.pathname.slice('/callenvoy'.length) || '/';
   if (p.startsWith('/api/')) return api(req, res, p, url.searchParams);
@@ -444,4 +543,4 @@ const server = http.createServer(async (req, res) => {
   fs.createReadStream(f).pipe(res);
 });
 server.on('upgrade', (req, socket) => (req.url.startsWith('/callenvoy/audio/') ? audioSocket(req, socket) : socket.destroy()));
-server.listen(PORT, () => console.log(`mock CallEnvoy on http://localhost:${PORT}/callenvoy/  (sign in: ${OWNER_EMAIL}, or open /__mock/signin; agent key: dev-key)`));
+server.listen(PORT, () => console.log(`mock CallEnvoy on http://localhost:${PORT}/callenvoy/  (sign in: ${OWNER_EMAIL} or sam@example.com, or open /__mock/signin?as=sam; agent key: dev-key)`));

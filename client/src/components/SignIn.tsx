@@ -1,16 +1,23 @@
-// Console sign-in by a one-time email link (plan round 2, B1). The session is an HttpOnly cookie.
+// Console sign-in by a one-time email link (plan round 2, B1; round 3 B1). The session is an HttpOnly cookie.
 import { router } from 'expo-router';
 import { useState } from 'react';
 import { Text } from 'react-native';
 import { api, ApiError } from '../api';
 import { useNow, useSession } from '../hooks';
-import { Button, CopyBlock, Gate, Note, T, TextField, text } from './ui';
+import { Button, CopyBlock, Gate, Note, Stack, T, TextField, text } from './ui';
 
 const RESEND_SECONDS = 30;
 const SIGNIN_COMMAND = 'uv run python -m callenvoy.signin';
+// Refusals the visitor must understand; other errors show the server's message.
+const REFUSED: Record<string, string> = {
+  signups_closed: 'New accounts are closed right now. If you already have an account, check the address.',
+  account_disabled: 'This account is disabled, so it cannot sign in.',
+};
+const reason = (e: unknown) => (e instanceof ApiError && e.code && REFUSED[e.code]) || (e as Error).message;
 
-/** Email field and "Send sign-in link", then "Check your email". */
-export function SignInGate() {
+/** Email field and "Send sign-in link" (signs in, or makes the account at the first sign-in), then "Check your email".
+ *  `fieldId`: the email field's id, so the page can move focus there. */
+export function SignInForm({ fieldId }: { fieldId: string }) {
   const { me } = useSession();
   const [email, setEmail] = useState('');
   const [sentAt, setSentAt] = useState<number | null>(null); // the last link request; kept when going back to the address
@@ -31,28 +38,26 @@ export function SignInGate() {
       setSentAt(Date.now());
       setChecking(true);
     } catch (e) {
-      setError((e as Error).message);
+      setError(reason(e));
     }
     setBusy(false);
   };
 
   if (me && !me.mail_ready)
     return (
-      <Gate>
-        <Text style={text.brand}>CallEnvoy</Text>
-        <T v="h1">Sign in</T>
+      <Stack>
         <T v="muted">Email sign-in is not set up on this server. Run this command on the server to get a one-time sign-in link, then open the link in this browser.</T>
         <CopyBlock code={SIGNIN_COMMAND} name="sign-in command" />
-        <T v="fine">To get links by email, set OWNER_EMAIL and the SMTP settings in the server's .env file.</T>
-      </Gate>
+        <T v="fine">To send links by email, set OWNER_EMAIL and the SMTP settings in the server's .env file.</T>
+      </Stack>
     );
 
   if (checking)
     return (
-      <Gate>
-        <Text style={text.brand}>CallEnvoy</Text>
-        <T v="h1">Check your email</T>
-        <T v="muted">{`If ${email.trim()} is the owner address, a sign-in link is on its way. The link works once, for 15 minutes.`}</T>
+      <Stack>
+        <Note kind="saved" title="Check your email">
+          {`We sent a sign-in link to ${email.trim()}. Open it in this browser. The link works once, for 15 minutes.`}
+        </Note>
         {error ? <Note kind="errsum">{error}</Note> : null}
         <Button
           label={busy ? 'Sending...' : wait ? `Send again (${wait} s)` : 'Send again'}
@@ -62,28 +67,26 @@ export function SignInGate() {
           onPress={send}
         />
         <Button label="Use another address" kind="link" onPress={() => setChecking(false)} />
-      </Gate>
+      </Stack>
     );
 
   return (
-    <Gate>
-      <Text style={text.brand}>CallEnvoy</Text>
-      <T v="h1">Sign in</T>
-      <T v="muted">This is the private console. We email a one-time sign-in link to the owner address.</T>
+    <Stack>
+      {me && !me.signups_open ? <Note kind="warn">New accounts are closed right now. If you already have an account, you can still sign in.</Note> : null}
       <TextField
         label="Email"
+        nativeID={fieldId}
         value={email}
         onChangeText={setEmail}
         inputMode="email"
         autoComplete="email"
         autoCapitalize="none"
-        autoFocus
         onSubmitEditing={send}
         error={error}
       />
-      <Button label={busy ? 'Sending...' : wait ? `Send sign-in link (${wait} s)` : 'Send sign-in link'} busy={busy} disabled={wait > 0} onPress={send} />
-      <T v="fine">{`No email? Run ${SIGNIN_COMMAND} on the server for a link.`}</T>
-    </Gate>
+      <Button label={busy ? 'Sending...' : wait ? `Send sign-in link (${wait} s)` : 'Send sign-in link'} busy={busy} disabled={wait > 0} onPress={send} full />
+      {me?.signups_open ? <T v="fine">New here? The same link makes your account.</T> : null}
+    </Stack>
   );
 }
 
@@ -110,7 +113,7 @@ export function SignInLink({ token }: { token: string | undefined }) {
       setError('You are signed in, but the console could not load. Check your connection and try again.');
     } catch (e) {
       if (e instanceof ApiError && e.code === 'bad_link') setBad(true);
-      else setError((e as Error).message);
+      else setError(reason(e));
     }
     setBusy(false);
   };

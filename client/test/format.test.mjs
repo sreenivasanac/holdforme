@@ -1,7 +1,7 @@
 // Transcript helpers of the recording player.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ago, lineAt, mergeLines } from '../src/format.ts';
+import { ago, day, lineAt, mergeLines } from '../src/format.ts';
 
 const T0 = Date.parse('2026-11-11T10:00:00Z');
 const l = (n, sec, who, text, at = null) => ({ n, t: new Date(T0 + sec * 1000).toISOString(), who, text, at });
@@ -55,4 +55,10 @@ test('ago', () => {
   assert.equal(ago('2026-11-11T09:00:00Z', now), '3 h ago');
   assert.equal(ago('2026-11-10T11:00:00Z', now), '1 day ago');
   assert.equal(ago('2026-11-01T12:00:00Z', now), '10 days ago');
+});
+
+test('day shows the year only for another year', () => {
+  const now = new Date(2026, 10, 14);
+  assert.doesNotMatch(day(new Date(2026, 1, 3).toISOString(), now), /2026/);
+  assert.match(day(new Date(2025, 11, 30).toISOString(), now), /2025/);
 });

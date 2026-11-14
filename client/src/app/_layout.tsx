@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import type { Call } from '../api';
 import { Loading } from '../components/Loading';
-import { SignInGate } from '../components/SignIn';
+import { Landing } from '../components/Landing';
 import { TopBar } from '../components/TopBar';
 import { Button, Gate, Sheet, T } from '../components/ui';
 import {
@@ -35,7 +35,7 @@ export default function RootLayout() {
         ) : me.signed_in ? (
           <Console />
         ) : (
-          <SignInGate />
+          <Landing />
         )}
       </View>
     </SessionContext.Provider>

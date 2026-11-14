@@ -3,6 +3,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import type { Call } from '../api';
 import { CallList, EmptyCalls, LiveCallCard } from '../components/CallList';
 import { Loading } from '../components/Loading';
+import { useWelcome, WelcomeCard } from '../components/Welcome';
 import { Card, Chips, Screen, T, text } from '../components/ui';
 import { useCalls } from '../hooks';
 import { space } from '../theme';
@@ -22,10 +23,12 @@ const shows = (c: Call, f: Filter) =>
 export default function CallsScreen() {
   const { calls, error, refresh } = useCalls();
   const [filter, setFilter] = useState<Filter>('all');
+  const [welcome, hideWelcome] = useWelcome();
   const live = calls?.filter((c) => !c.finished) ?? [];
   const shown = calls?.filter((c) => shows(c, filter)) ?? [];
   return (
     <Screen>
+      {welcome ? <WelcomeCard onHide={hideWelcome} /> : null}
       {live.map((c) => (
         <LiveCallCard key={c.id} call={c} />
       ))}

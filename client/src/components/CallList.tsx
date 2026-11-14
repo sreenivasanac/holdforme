@@ -4,7 +4,7 @@ import type { Call } from '../api';
 import { callSeconds, duration, ownerLabel, phone, statusLabel, when } from '../format';
 import { useGo, useNow } from '../hooks';
 import { border, callColumns, color, font, space, useWide } from '../theme';
-import { Button, Card, Pill, text } from './ui';
+import { Button, Card, Pill, TableHead, text } from './ui';
 
 /** Status pill plus the owner-state pill of a call. */
 export function StatusBadge({ call }: { call: Call }) {
@@ -24,15 +24,7 @@ export function CallList({ calls }: { calls: Call[] }) {
   const now = useNow(1000, calls.some((c) => !c.finished));
   return (
     <View>
-      {wide && (
-        <View style={[s.cols, s.head]} aria-hidden>
-          {['Business', 'Status', 'Length', 'Started'].map((h, i) => (
-            <Text key={h} style={[s.headText, { flex: callColumns[i] }]}>
-              {h}
-            </Text>
-          ))}
-        </View>
-      )}
+      {wide && <TableHead titles={['Business', 'Status', 'Length', 'Started']} flex={callColumns} />}
       <View role="list">
         {calls.map((c, i) => (
           <CallRow key={c.id} call={c} now={now} first={i === 0} />
@@ -166,8 +158,6 @@ const s = StyleSheet.create({
   fill: { flex: 1 },
   badges: { flexDirection: 'row', flexWrap: 'wrap', gap: space.s, alignItems: 'center', flexShrink: 1 },
   cols: { flexDirection: 'row', alignItems: 'center', gap: space.ml },
-  head: { paddingHorizontal: space.xs, paddingBottom: space.sm, borderBottomWidth: border.thin, borderBottomColor: color.line },
-  headText: { color: color.muted, fontSize: font.size.s, fontWeight: font.weight.semi },
   divider: { borderTopWidth: border.thin, borderTopColor: color.line },
   row: { paddingVertical: space.ml, paddingHorizontal: space.xs, gap: space.xxs },
   hover: { backgroundColor: color.card2 },

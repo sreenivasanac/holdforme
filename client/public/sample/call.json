@@ -1,0 +1,212 @@
+{
+ "business": "Northstar Utilities",
+ "goal": "Ask billing to remove a wrong charge of 30 dollars on the October bill and get a reference number.",
+ "duration_seconds": 129,
+ "outcome": {
+  "result": "done",
+  "summary": "The $30 charge was removed from the October bill and a reference number NS-18145 was provided.",
+  "details": {
+   "reference_number": "NS-18145"
+  }
+ },
+ "lines": [
+  {
+   "n": 0,
+   "who": "them",
+   "text": "Thank for calling North",
+   "at": 5.4
+  },
+  {
+   "n": 1,
+   "who": "them",
+   "text": "Star Internet.",
+   "at": 7.0
+  },
+  {
+   "n": 2,
+   "who": "them",
+   "text": "This is a demo line.",
+   "at": 7.2
+  },
+  {
+   "n": 3,
+   "who": "them",
+   "text": "For billing,",
+   "at": 8.7
+  },
+  {
+   "n": 4,
+   "who": "them",
+   "text": "one. For technical support,",
+   "at": 9.7
+  },
+  {
+   "n": 5,
+   "who": "them",
+   "text": "press two.",
+   "at": 12.2
+  },
+  {
+   "n": 6,
+   "who": "them",
+   "text": "For all other questions,",
+   "at": 12.9
+  },
+  {
+   "n": 7,
+   "who": "them",
+   "text": "press zero.",
+   "at": 14.2
+  },
+  {
+   "n": 8,
+   "who": "event",
+   "text": "pressed 1",
+   "at": 15.2
+  },
+  {
+   "n": 9,
+   "who": "them",
+   "text": "You have",
+   "at": 17.5
+  },
+  {
+   "n": 10,
+   "who": "them",
+   "text": "reached billing.",
+   "at": 18.0
+  },
+  {
+   "n": 11,
+   "who": "them",
+   "text": "Your call is important to us.",
+   "at": 19.8
+  },
+  {
+   "n": 12,
+   "who": "them",
+   "text": "The estimated wait time is less than one minute.",
+   "at": 22.8
+  },
+  {
+   "n": 13,
+   "who": "event",
+   "text": "waiting on hold",
+   "at": 26.4
+  },
+  {
+   "n": 14,
+   "who": "them",
+   "text": "Thank you for holding.",
+   "at": 35.7
+  },
+  {
+   "n": 15,
+   "who": "them",
+   "text": "This call may be recorded for quality and training purposes.",
+   "at": 37.1
+  },
+  {
+   "n": 16,
+   "who": "them",
+   "text": "Please continue to hold.",
+   "at": 40.7
+  },
+  {
+   "n": 17,
+   "who": "them",
+   "text": "And the next available agent will be with you shortly.",
+   "at": 45.2
+  },
+  {
+   "n": 18,
+   "who": "them",
+   "text": "Your call is important to us.",
+   "at": 55.1
+  },
+  {
+   "n": 19,
+   "who": "them",
+   "text": "Please stay on the line.",
+   "at": 57.0
+  },
+  {
+   "n": 20,
+   "who": "them",
+   "text": "Thanks for holding. This is Maria in billing. How can I help you today?",
+   "at": 71.3
+  },
+  {
+   "n": 21,
+   "who": "ai",
+   "text": "Hi Maria, I’m calling on behalf of Alex Morgan. There’s a wrong charge of 30 dollars on the October bill—could you please remove it and provide a reference number?",
+   "at": 74.4
+  },
+  {
+   "n": 22,
+   "who": "event",
+   "text": "alert sent",
+   "at": 84.4
+  },
+  {
+   "n": 23,
+   "who": "them",
+   "text": "Absolutely. I can help with that. May I have the service address or the account phone number for",
+   "at": 86.5
+  },
+  {
+   "n": 24,
+   "who": "them",
+   "text": "Morgan to look up the account?",
+   "at": 92.9
+  },
+  {
+   "n": 25,
+   "who": "ai",
+   "text": "The service address is 12 Oak Street, Springfield.",
+   "at": 93.1
+  },
+  {
+   "n": 26,
+   "who": "them",
+   "text": "Thank you. I've located the account and removed the thirty dollars",
+   "at": 99.6
+  },
+  {
+   "n": 27,
+   "who": "them",
+   "text": "charge from the October bill. A credit will appear on the next statement. Your reference number is n s one eight one four five. That's n as in Nancy, s as in Sam,",
+   "at": 104.2
+  },
+  {
+   "n": 28,
+   "who": "them",
+   "text": "dash",
+   "at": 113.2
+  },
+  {
+   "n": 29,
+   "who": "them",
+   "text": "Is there anything else I can help you with today?",
+   "at": 115.3
+  },
+  {
+   "n": 30,
+   "who": "event",
+   "text": "AI ended the call",
+   "at": 119.3
+  },
+  {
+   "n": 31,
+   "who": "ai",
+   "text": "Thank you, just to confirm, the reference number is NS-18145. That’s all for today. Have a great day, goodbye.",
+   "at": 117.7
+  },
+  {
+   "n": 32,
+   "who": "event",
+   "text": "hang up requested",
+   "at": 127.9
+  }
+ ]
+}
