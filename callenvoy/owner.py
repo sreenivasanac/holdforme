@@ -70,7 +70,7 @@ def _bot(call_id: str):
 
 
 def _name(row: dict) -> str:
-    return prompt.owner_name(row, calls.get_profile())
+    return prompt.owner_name(row, calls.get_profile(row["user_id"]))
 
 
 def _set(call_id: str, **fields) -> None:
@@ -107,8 +107,8 @@ def push_state(call_id: str) -> None:
             pass
 
 
-def _live(call_id: str) -> dict:
-    row = calls.must(call_id)
+def _live(user_id: str, call_id: str) -> dict:
+    row = calls.must(user_id, call_id)
     if row["status"] != "in_progress":
         raise calls.CallError("the call is not live", 409)
     return row
@@ -144,8 +144,8 @@ async def _expire_alert(call_id: str, seconds: int) -> None:
 
 
 async def _ring(call_id: str, mode: str, phone: str | None = None) -> bool:
-    """Rings the owner's phone (a second Twilio call). False when there is no number to ring."""
-    profile = calls.get_profile()
+    """Rings the phone of the call's user (a second Twilio call). False when there is no number to ring."""
+    profile = calls.get_profile(calls.call_row(call_id)["user_id"])
     number = phone or profile["callback_number"]
     if not number:
         return False
@@ -249,10 +249,10 @@ async def listen_in(call_id: str) -> None:
     await _alert(call_id, "listen_in")
 
 
-async def connect(call_id: str, mode: str = "join", reach: str = "phone", phone: str | None = None) -> str:
+async def connect(user_id: str, call_id: str, mode: str = "join", reach: str = "phone", phone: str | None = None) -> str:
     """connect_me / the console's connect route: bring the owner to the call now.
     reach "phone" always rings the phone, also while a browser link is open (the phone link then replaces it)."""
-    _live(call_id)
+    _live(user_id, call_id)
     o = get(call_id)
     if mode not in ("join", "listen") or reach not in ("phone", "app"):
         raise calls.CallError('mode must be "join" or "listen"; reach must be "phone" or "app"', field="mode")
@@ -269,7 +269,7 @@ async def connect(call_id: str, mode: str = "join", reach: str = "phone", phone:
             phone = guard.check_number(phone)
         except ValueError as e:
             raise calls.CallError(f"phone: {e}", field="phone") from e
-    elif not calls.get_profile()["callback_number"]:
+    elif not calls.get_profile(user_id)["callback_number"]:
         raise calls.CallError("no phone given and no callback number saved", field="phone")
     if o.state == "ringing":
         return "the owner's phone is already ringing"

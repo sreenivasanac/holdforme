@@ -77,8 +77,10 @@ FINAL_STATUSES = ("completed", "no_answer", "busy", "failed", "canceled")
 LIVE_STATUSES = ("queued", "dialing", "in_progress")
 # TODO: make these settings if the owner wants (QUESTION_WAIT_SECONDS, OWNER_DROP_GRACE_SECONDS, audio sizes).
 
-INBOUND_RING_SECONDS = 25  # forwarded callback rings the owner this long
-INBOUND_BUSINESS_DAYS = 14  # a callback is named after the newest outbound call to that number in this window
+INBOUND_RING_SECONDS = 25  # forwarded callback rings the user this long
+# A callback goes to the user who last called that number in this window (else the admin), and is named after
+# that user's newest outbound call to it.
+INBOUND_BUSINESS_DAYS = 14
 # TODO: SMS alerts (needs Twilio A2P 10DLC registration).
 
 # --- Owner audio ---
@@ -106,7 +108,18 @@ IMPORTED_KEY_NAME = "First key (.env)"
 SESSION_COOKIE = "ce_session"
 SESSION_DAYS = 30
 SIGNIN_TOKEN_MINUTES = 15
-SIGNIN_REQUESTS_PER_HOUR = 5  # all sign-in mail requests together
+# Sign-in link requests (POST /api/auth/request), in memory: (limit, window seconds) per address, per client IP,
+# and for all requests together.
+SIGNIN_LIMIT_PER_ADDRESS = (3, 3600)
+SIGNIN_LIMIT_PER_IP = (10, 3600)
+SIGNIN_LIMIT_GLOBAL = (60, 86400)
+EMAIL_MAX = 254
+SIGNUPS_OPEN_DEFAULT = True  # the admin's "New sign-ups" switch (stored in the database once changed)
+USER_SEEN_WRITE_SECONDS = 60  # users.last_seen_at is written at most this often
+# Profile key (not a setting) with the callback number this user asked Twilio to verify. Twilio's verified
+# caller IDs are shared by the whole account, so "from own" also needs this claim: no user can call from a
+# number that another user verified.
+CALLER_ID_CLAIM = "verified_caller_id"
 SMTP_PORT = 587  # STARTTLS
 SMTP_TIMEOUT_SECONDS = 20
 
@@ -159,6 +172,12 @@ DEMO_HOLD = [  # about 50 s of spoken hold messages with pauses between them
 DEMO_HOLD_PAUSE_SECONDS = 10
 DEMO_REP_NAME = "Maria"
 DEMO_BUSINESS = "Northstar Internet"
+DEMO_LINE_NUMBER = "+16562405137"  # answers only TWILIO_FROM_NUMBER, so calls to it always use that caller ID
+DEMO_CALL = {  # GET /api/config "demo": pre-fills a first call to the demo line (the console's welcome step)
+    "number": DEMO_LINE_NUMBER, "business": DEMO_BUSINESS,
+    "goal": "Ask billing to remove a wrong charge of 30 dollars on the October bill and get a reference number.",
+    "facts": "Service address: 12 Oak Street, Springfield.", "menu_tips": "Billing is option 1.",
+}
 
 
 REQUIRED_ENV = ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER", "DEEPGRAM_API_KEY",

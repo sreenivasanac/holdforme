@@ -7,9 +7,9 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from callenvoy import calls, config, demo_line, guard, main, mcp_server, owner, store
+from callenvoy import auth, calls, config, demo_line, guard, main, mcp_server, owner, store
 
-from .conftest import CALL, KEY, owner_cookie, run
+from .conftest import CALL, KEY, owner_cookie, run, uid
 
 AUTH = {"Authorization": f"Bearer {KEY}"}
 BASE = "http://localhost:3020"
@@ -101,8 +101,29 @@ def test_mcp_http_auth_and_key_in_path(client):
     assert r.status_code == 401 and r.headers["x-robots-tag"] == "noindex" and "wrongkey" not in r.text
 
 
+def test_mcp_http_tools_act_for_the_keys_user(client):
+    """The key's user reaches the tools through the SDK's own tasks (auth.CURRENT_USER), per request."""
+    b = store.add_user("bo@example.com")["id"]
+    _, b_key = auth.create_key(b, "Codex")
+    cid = run(calls.place_call(uid(), calls.PlaceCallInput(**CALL)))["id"]
+
+    def tool(key, name, args):
+        body = {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": name, "arguments": args}}
+        return client.post(f"/callenvoy/mcp/{key}", json=body, headers=MCP_HEADERS).json()["result"]
+
+    assert tool(b_key, "callenvoy_list_calls", {})["structuredContent"] == {"calls": []}
+    assert [c["id"] for c in tool(KEY, "callenvoy_list_calls", {})["structuredContent"]["calls"]] == [cid]
+    r = tool(b_key, "callenvoy_get_call", {"call_id": cid})
+    assert r["isError"] and r["content"][0]["text"] == f"no call with id {cid}"
+    r = tool(b_key, "callenvoy_place_call", CALL)
+    assert r["isError"] and "set your name" in r["content"][0]["text"]
+    assert auth.CURRENT_USER.get() is None
+
+
 def test_mcp_in_process_tools_and_profile_round_trip():
     from mcp import Client
+
+    token = auth.CURRENT_USER.set(store.get_user(uid()))  # as AuthMiddleware does for the key's user
 
     async def go():
         async with Client(mcp_server.server) as c:
@@ -120,13 +141,16 @@ def test_mcp_in_process_tools_and_profile_round_trip():
             assert not r.is_error
             r = await c.call_tool("callenvoy_get_call", {"call_id": r.structured_content["id"]})
             assert "Northstar" in r.content[0].text
-    run(go())
+    try:
+        run(go())
+    finally:
+        auth.CURRENT_USER.reset(token)
 
 
 def test_inbound_twiml(client):
     r = signed(client, "/twilio/inbound", {"From": "+14155550123", "CallSid": "CA1"})
     assert "does not take calls" in r.text
-    store.save_profile({"callback_number": "+14155550199"})
+    store.save_profile(uid(), {"callback_number": "+14155550199"})
     r = signed(client, "/twilio/inbound", {"From": "+14155550123", "CallSid": "CA2"})
     doc = xml.dom.minidom.parseString(r.text)
     dial = doc.getElementsByTagName("Dial")[0]
@@ -186,7 +210,7 @@ def test_logs_are_quiet():
 
 
 def test_owner_phone_twiml(client):
-    v = run(calls.place_call(calls.PlaceCallInput(**CALL)))
+    v = run(calls.place_call(uid(), calls.PlaceCallInput(**CALL)))
     store.update_call(v["id"], status="in_progress")
     owner.get(v["id"])
     doc = xml.dom.minidom.parseString(signed(client, f"/twilio/owner/{v['id']}", {"CallSid": "CA9"}).text)
@@ -196,7 +220,7 @@ def test_owner_phone_twiml(client):
 
 
 def _live_call():
-    v = run(calls.place_call(calls.PlaceCallInput(**CALL)))
+    v = run(calls.place_call(uid(), calls.PlaceCallInput(**CALL)))
     store.update_call(v["id"], status="in_progress")
     return v["id"]
 

@@ -1,10 +1,10 @@
 from callenvoy import calls, store
 
-from .conftest import CALL, run
+from .conftest import CALL, run, uid
 
 
 def test_call_lines_questions():
-    v = run(calls.place_call(calls.PlaceCallInput(**CALL)))
+    v = run(calls.place_call(uid(), calls.PlaceCallInput(**CALL)))
     cid = v["id"]
     assert store.get_call(cid)["status"] == "dialing"
     assert store.add_line(cid, "them", "hello") == 0
@@ -18,15 +18,15 @@ def test_call_lines_questions():
 
 
 def test_profile_merge_and_remove():
-    store.save_profile({"name": "Alex", "voice": "Sarah"})
-    store.save_profile({"details": "x"})
-    assert store.get_profile() == {"name": "Alex", "voice": "Sarah", "details": "x"}
-    store.save_profile({"name": None})
-    assert "name" not in store.get_profile()
+    store.save_profile(uid(), {"name": "Alex", "voice": "Sarah"})
+    store.save_profile(uid(), {"details": "x"})
+    assert store.get_profile(uid()) == {"name": "Alex", "voice": "Sarah", "details": "x"}
+    store.save_profile(uid(), {"name": None})
+    assert "name" not in store.get_profile(uid())
 
 
 def test_restart_cleanup_hangs_up_orphans(fresh):
-    v = run(calls.place_call(calls.PlaceCallInput(**CALL)))
+    v = run(calls.place_call(uid(), calls.PlaceCallInput(**CALL)))
     store.update_call(v["id"], owner_twilio_sid="CAowner")
     calls.LIVE.clear()
     run(calls.restart_cleanup())
@@ -42,7 +42,7 @@ def test_data_dir_and_files_are_private(tmp_path):
     old = os.umask(0o077)
     try:
         store.open_db(tmp_path / "data" / "callenvoy.db")
-        store.save_profile({"name": "Alex"})
+        store.save_profile(uid(), {"name": "Alex"})
         assert (tmp_path / "data").stat().st_mode & 0o777 == 0o700
         for f in (tmp_path / "data").iterdir():
             assert f.stat().st_mode & 0o077 == 0, f.name

@@ -15,13 +15,13 @@ from mcp.server.mcpserver import MCPServer
 from mcp_types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import Field
 
-from . import calls, config, owner
+from . import auth, calls, config, owner
 
 log = logging.getLogger("callenvoy.mcp")
 P = config.TOOL_PREFIX
 
 INSTRUCTIONS = f"""{config.APP_NAME} places real phone calls for the user and can bring the user onto a call.
-1. Read {P}get_profile first: the user's name, callback number and call defaults. Collect every detail the call needs BEFORE dialing (what to get done, the facts the AI may share, what it may accept without asking).
+1. Read {P}get_profile first: the user's name, callback number and call defaults. A call needs the name: if it is empty, ask the user and save it with {P}save_profile. Collect every detail the call needs BEFORE dialing (what to get done, the facts the AI may share, what it may accept without asking).
 2. Place the call with {P}place_call. It returns a call id at once.
 3. Loop {P}get_call with wait_seconds: 30 (pass next_line back as since_line) until finished is true.
 4. If open_questions is not empty, the person on the phone is waiting: ask the user and reply with {P}answer_question right away.
@@ -35,6 +35,14 @@ OPEN = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_
 DIALS = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=True)
 
 CallId = Annotated[str, Field(min_length=1, max_length=40, description='the call id from callenvoy_place_call, e.g. "c_ab12..."')]
+
+
+def uid() -> str:
+    """The id of the key's user (set per request by main.AuthMiddleware). No user: refuse, never guess."""
+    user = auth.CURRENT_USER.get()
+    if not user:
+        raise calls.CallError("no user for this request", 401)
+    return user["id"]
 
 
 def ok(text: str, data: Any) -> CallToolResult:
@@ -112,7 +120,7 @@ def build() -> MCPServer:
     server = MCPServer(name=config.APP_NAME, instructions=INSTRUCTIONS, version="1.0.0")
 
     async def place_call(**kw) -> CallToolResult:
-        v = await calls.place_call(calls.PlaceCallInput.model_validate(kw))
+        v = await calls.place_call(uid(), calls.PlaceCallInput.model_validate(kw))
         return ok(f"calling {v['business']} at {v['number']} ({v['id']}) from {v['calling_number'] or 'the CallEnvoy number'}. "
                   f"Poll {P}get_call with wait_seconds: 30 until finished, and answer any open question at once.", v)
 
@@ -128,17 +136,17 @@ def build() -> MCPServer:
     async def get_call(call_id: CallId,
                        wait_seconds: Annotated[int, Field(ge=0, le=50, description="wait up to this long for a change")] = 0,
                        since_line: Annotated[int, Field(ge=0, description="only transcript lines from this number on")] = 0) -> CallToolResult:
-        v = await calls.get_call(call_id, wait_seconds, since_line)
+        v = await calls.get_call(uid(), call_id, wait_seconds, since_line)
         return ok(call_text(v), v)
 
     @tool(server, "hang_up", "Hang up a call", "End a live call now, including the user's phone leg. Safe to repeat.", DIALS)
     async def hang_up(call_id: CallId) -> CallToolResult:
-        msg = await calls.hang_up(call_id)
+        msg = await calls.hang_up(uid(), call_id)
         return ok(msg, {"call_id": call_id, "message": msg})
 
     @tool(server, "list_calls", "List recent calls", "Recent calls, newest first, without transcripts.", RO)
     async def list_calls(limit: Annotated[int, Field(ge=1, le=50)] = 10) -> CallToolResult:
-        rows = calls.list_calls(limit)
+        rows = calls.list_calls(uid(), limit)
         text = "\n".join(f"{v['id']} · {v['created_at'][:16].replace('T', ' ')} · {v['direction']} · {v['status']} · "
                          f"{v['business']} {v['number']}{' · ' + v['outcome']['summary'] if v['outcome'] else ''}"
                          for v in rows) or "no calls yet"
@@ -147,7 +155,7 @@ def build() -> MCPServer:
     @tool(server, "answer_question", "Answer the AI's question",
           "Answer a question the AI asked mid-call (open_questions). The AI says it on the line. Answer in a few plain words.", ACT)
     async def answer_question(call_id: CallId, question_id: calls.QuestionId, answer: calls.AnswerText) -> CallToolResult:
-        r = await calls.answer_question(call_id, question_id, answer)
+        r = await calls.answer_question(uid(), call_id, question_id, answer)
         return ok(f'sent to the AI: "{r["answer"]}"', r)
 
     @tool(server, "connect_me", "Bring the user onto a live call",
@@ -159,19 +167,19 @@ def build() -> MCPServer:
                          mode: Literal["join", "listen"] = "join",
                          reach: Literal["phone", "app"] = "phone",
                          phone: Annotated[str | None, Field(max_length=40, description="a different US/Canada number to ring")] = None) -> CallToolResult:
-        msg = await owner.connect(call_id, mode, reach, phone)
+        msg = await owner.connect(uid(), call_id, mode, reach, phone)
         return ok(msg, {"call_id": call_id, "message": msg, "owner": owner.view(call_id)})
 
     @tool(server, "hand_back", "Give the call back to the AI",
           "While the user has the call, give it back to the AI. The user keeps listening if their audio is open.", ACT)
     async def hand_back(call_id: CallId) -> CallToolResult:
-        msg = await owner.hand_back(call_id)
+        msg = await owner.hand_back(calls.must(uid(), call_id)["id"])
         return ok(msg, {"call_id": call_id, "message": msg})
 
     @tool(server, "get_recordings", "Get call recordings",
           "Recording links of a call: [{url, duration_seconds}]. Empty until Twilio has finished the file.", RO)
     async def get_recordings(call_id: CallId) -> CallToolResult:
-        row = calls.must(call_id)
+        row = calls.must(uid(), call_id)
         recs = calls.recordings(row)
         note = ("this call was not recorded" if not row["record"] else
                 "no recording yet; try again in a minute" if not recs else
@@ -181,11 +189,12 @@ def build() -> MCPServer:
     @tool(server, "get_profile", "Saved profile and settings",
           "The user's saved profile (name, callback number, calling profile details) and every call setting.", RO)
     async def get_profile() -> CallToolResult:
-        p = profile_view(calls.get_profile(), (await calls.caller_id())["verified"])
+        me = uid()
+        p = profile_view(calls.get_profile(me), (await calls.caller_id(me))["verified"])
         return ok("\n".join(f"{k}: {v}" for k, v in p.items() if v is not None), p)
 
     async def save_profile(**kw) -> CallToolResult:
-        return ok("saved", calls.save_profile(kw))  # None (not given) is skipped there
+        return ok("saved", calls.save_profile(uid(), kw))  # None (not given) is skipped there
 
     tool(server, "save_profile", "Save profile and settings",
          "Merge fields into the saved profile and settings. An empty string removes a text field. Wrong values give "
@@ -203,7 +212,7 @@ def build() -> MCPServer:
           "Starts Twilio's verification of the saved callback number, so calls can show it (place_call from: \"own\"). "
           "Twilio calls that number; the user types the returned 6-digit code on the keypad. Tell the user the code.", OPEN)
     async def verify_number() -> CallToolResult:
-        r = await calls.verify_number()
+        r = await calls.verify_number(uid())
         return ok(r["message"], r)
 
     return server

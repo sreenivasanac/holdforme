@@ -1,6 +1,7 @@
 """Calls: place, follow (long-poll), hang up, answer questions, limits, the watchdog, settings order.
 
 The MCP tools and the console API both call these functions; there is no second code path.
+Every entry point that a user reaches takes the user id: a call of another user answers like an unknown id.
 """
 
 import asyncio
@@ -172,15 +173,15 @@ def check_setting(key: str, value: Any) -> Any:
     return value
 
 
-def get_profile() -> dict:
-    saved = store.get_profile()
+def get_profile(user_id: str) -> dict:
+    saved = store.get_profile(user_id)
     return {k: saved.get(k, d) for k, d in config.SETTING_DEFAULTS.items()}
 
 
-def save_profile(fields: dict) -> dict:
+def save_profile(user_id: str, fields: dict) -> dict:
     changes = {k: check_setting(k, v) for k, v in fields.items() if v is not None}
-    store.save_profile(changes)
-    return get_profile()
+    store.save_profile(user_id, changes)
+    return get_profile(user_id)
 
 
 def resolve(inp: PlaceCallInput, profile: dict) -> dict:
@@ -204,12 +205,15 @@ def resolve(inp: PlaceCallInput, profile: dict) -> dict:
 # --- Limits ---
 
 def check_limits() -> None:
+    """The service's shared limits (all users together). The messages say nothing about other users' calls."""
     live = store.live_calls()
     if len(live) >= config.MAX_CONCURRENT_CALLS:
-        raise CallError(f"{config.MAX_CONCURRENT_CALLS} calls are already running; wait for one to end", 429)
+        raise CallError(f"the service is busy (at most {config.MAX_CONCURRENT_CALLS} calls at a time); "
+                        "try again in a few minutes", 429)
     running = sum(_elapsed(r) for r in live)
     if (store.talk_seconds_today() + running) / 60 >= config.DAILY_MINUTE_CAP:
-        raise CallError(f"today's limit of {config.DAILY_MINUTE_CAP} call minutes is reached", 429)
+        raise CallError(f"the service's daily limit of {config.DAILY_MINUTE_CAP} call minutes is reached; "
+                        "try again tomorrow", 429)
 
 
 def _ts(iso: str) -> datetime:
@@ -222,8 +226,23 @@ def _elapsed(row: dict) -> int:
     return int((datetime.now(timezone.utc) - _ts(row["answered_at"])).total_seconds())
 
 
-def minutes_used_today() -> int:
-    return (store.talk_seconds_today() + sum(_elapsed(r) for r in store.live_calls())) // 60
+def minutes_used_today(user_id: str | None = None) -> int:
+    """The service's minutes today (all users: the daily cap), or one user's."""
+    live = [r for r in store.live_calls() if user_id is None or r["user_id"] == user_id]
+    return (store.talk_seconds_today(user_id) + sum(_elapsed(r) for r in live)) // 60
+
+
+def usage() -> dict[str, dict]:
+    """user id -> calls, minutes, minutes_today, live_calls (the admin's list: numbers only)."""
+    out = {uid: {"calls": u["calls"], "minutes": u["seconds"] // 60, "minutes_today": u["seconds_today"], "live_calls": 0}
+           for uid, u in store.usage().items()}
+    for r in store.live_calls():
+        u = out.setdefault(r["user_id"], {"calls": 0, "minutes": 0, "minutes_today": 0, "live_calls": 0})
+        u["live_calls"] += 1
+        u["minutes_today"] += _elapsed(r)
+    for u in out.values():
+        u["minutes_today"] //= 60
+    return out
 
 
 # --- Place a call ---
@@ -232,13 +251,18 @@ def url(path: str) -> str:
     return config.public_base_url() + path
 
 
-async def place_call(inp: PlaceCallInput) -> dict:
+async def place_call(user_id: str, inp: PlaceCallInput) -> dict:
     try:
         number = guard.check_number(inp.to)
     except ValueError as e:
         raise CallError(f"to: {e}", field="to") from e
-    profile = get_profile()
+    profile = get_profile(user_id)
+    if not profile["name"]:
+        raise CallError("set your name first: the AI says it calls on your behalf. Save it with "
+                        "callenvoy_save_profile (name) or in the console under Settings > Profile", field="name")
     s = resolve(inp, profile)
+    if number == config.DEMO_LINE_NUMBER:
+        s["caller_id"] = "callenvoy"  # the demo line answers only the CallEnvoy number
     hand_over = s["mode"] == "transfer" or bool(inp.connect_when)
     if s["reach"] == "phone" and (hand_over or s["listen_in"]) and not profile["callback_number"]:
         raise CallError("this call may ring the user's phone, but no callback number is saved: save callback_number "
@@ -246,7 +270,7 @@ async def place_call(inp: PlaceCallInput) -> dict:
     from_number = None
     if s["caller_id"] == "own":  # looked up before the limit check, so no await sits between check and insert
         own = profile["callback_number"]
-        if not own or not await caller_id_verified(own):
+        if not own or not await caller_id_verified(user_id, own):
             raise CallError("the user's own number is not a verified caller ID yet: save callback_number, then run "
                             "callenvoy_verify_number (or Settings > Verify) and type the code on that phone; or use "
                             'from "callenvoy"', field="from")
@@ -256,7 +280,7 @@ async def place_call(inp: PlaceCallInput) -> dict:
     call_id = store.new_id("c_")
     text = lambda v: (v or "").strip() or None  # noqa: E731
     store.insert_call({
-        "id": call_id, "created_at": store.now(), "status": "queued", "phase": None,
+        "id": call_id, "user_id": user_id, "created_at": store.now(), "status": "queued", "phase": None,
         "to_number": number, "business": inp.business.strip(), "goal": inp.goal.strip(),
         "facts": text(inp.facts), "menu_tips": text(inp.menu_tips), "flexibility": text(inp.flexibility),
         "on_behalf_of": text(inp.on_behalf_of) or profile["name"],
@@ -302,11 +326,20 @@ async def _dial_timeout(call_id: str) -> None:
 
 # --- Read ---
 
-def must(call_id: str) -> dict:
-    row = store.get_call(call_id)
+def must(user_id: str, call_id: str) -> dict:
+    """The user's call, else 404 (also for another user's call: it answers like an unknown id)."""
+    row = store.user_call(user_id, call_id)
     if not row:
         raise CallError(f"no call with id {call_id}", 404, field="call_id")
     return row
+
+
+def call_row(call_id: str) -> dict:
+    """System paths (the bot, timers, webhooks) that already hold the call id: no user check."""
+    r = store.get_call(call_id)
+    if not r:
+        raise CallError(f"no call with id {call_id}", 404, field="call_id")
+    return r
 
 
 def is_final(row: dict) -> bool:
@@ -351,8 +384,8 @@ def view(row: dict, since_line: int = 0, transcript: bool = True) -> dict:
     return v
 
 
-async def get_call(call_id: str, wait_seconds: int = 0, since_line: int = 0) -> dict:
-    must(call_id)
+async def get_call(user_id: str, call_id: str, wait_seconds: int = 0, since_line: int = 0) -> dict:
+    must(user_id, call_id)
     live = LIVE.get(call_id)
     caught_up = since_line <= 0 or store.next_line(call_id) <= since_line
     if live and wait_seconds > 0 and caught_up:
@@ -361,17 +394,22 @@ async def get_call(call_id: str, wait_seconds: int = 0, since_line: int = 0) -> 
             await asyncio.wait_for(ev.wait(), min(wait_seconds, config.MAX_WAIT_SECONDS))
         except TimeoutError:
             pass
-    return view(must(call_id), since_line)
+    return view(must(user_id, call_id), since_line)
 
 
-def list_calls(limit: int = 10) -> list[dict]:
-    return [view(r, transcript=False) for r in store.list_calls(max(1, min(limit, 50)))]
+def list_calls(user_id: str, limit: int = 10) -> list[dict]:
+    return [view(r, transcript=False) for r in store.list_calls(user_id, max(1, min(limit, 50)))]
 
 
 # --- Actions ---
 
-async def hang_up(call_id: str) -> str:
-    row = must(call_id)
+async def hang_up(user_id: str, call_id: str) -> str:
+    return await stop_call(must(user_id, call_id))
+
+
+async def stop_call(row: dict) -> str:
+    """Hangs up a call (system paths: the watchdog, end_call, the admin disabling or removing a user)."""
+    call_id = row["id"]
     if is_final(row):
         return "the call already ended"
     event(call_id, "hang up requested")
@@ -390,8 +428,17 @@ async def hang_up(call_id: str) -> str:
     return "hanging up; callenvoy_get_call shows the final state"
 
 
-async def answer_question(call_id: str, question_id: str, answer: str) -> dict:
-    row = must(call_id)
+async def stop_user_calls(user_id: str, drop: bool = False) -> None:
+    """The admin disabled or removes a user: hang up their live calls. `drop` also forgets the in-memory state
+    (the rows are deleted next, so no final status will close them)."""
+    for r in store.user_live_calls(user_id):
+        await stop_call(r)
+        if drop:
+            await finish(r["id"])
+
+
+async def answer_question(user_id: str, call_id: str, question_id: str, answer: str) -> dict:
+    row = must(user_id, call_id)
     q = store.get_question(question_id)
     if not q or q["call_id"] != call_id:
         raise CallError(f"no open question {question_id} on this call", 404, field="question_id")
@@ -439,9 +486,14 @@ def note_line(call_id: str, who: str) -> None:
 
 # --- Caller ID (section 22.2) ---
 
-async def caller_id_verified(number: str | None) -> bool:
-    if not number:
+async def caller_id_verified(user_id: str, number: str | None) -> bool:
+    """Verified with Twilio AND verified by this user (config.CALLER_ID_CLAIM): Twilio's list is shared."""
+    if not number or store.get_profile(user_id).get(config.CALLER_ID_CLAIM) != number:
         return False
+    return await _twilio_verified(number)
+
+
+async def _twilio_verified(number: str) -> bool:
     try:
         return await twilio_api.caller_id_verified(number)
     except Exception as e:  # noqa: BLE001
@@ -449,58 +501,74 @@ async def caller_id_verified(number: str | None) -> bool:
         return False
 
 
-_caller_id_cache: dict[str, tuple[bool, float]] = {}  # number -> (verified, monotonic time of the lookup)
+_caller_id_cache: dict[tuple[str, str], tuple[bool, float]] = {}  # (user, number) -> (verified, lookup time)
 
 
-async def caller_id() -> dict:
+async def caller_id(user_id: str) -> dict:
     """For the console: Twilio's answer is cached for CALLER_ID_CACHE_SECONDS, cleared by a verify request."""
-    number = get_profile()["callback_number"]
-    hit = _caller_id_cache.get(number or "")
+    number = get_profile(user_id)["callback_number"]
+    hit = _caller_id_cache.get((user_id, number or ""))
     if hit and time.monotonic() - hit[1] < config.CALLER_ID_CACHE_SECONDS:
         return {"number": number, "verified": hit[0]}
-    verified = await caller_id_verified(number)
+    verified = await caller_id_verified(user_id, number)
     if number:
-        _caller_id_cache[number] = (verified, time.monotonic())
+        _caller_id_cache[(user_id, number)] = (verified, time.monotonic())
     return {"number": number, "verified": verified}
 
 
-async def verify_number() -> dict:
+async def verify_number(user_id: str) -> dict:
     _caller_id_cache.clear()
-    number = get_profile()["callback_number"]
+    number = get_profile(user_id)["callback_number"]
     if not number:
         raise CallError("save callback_number first; that is the number that gets verified", field="callback_number")
-    if await caller_id_verified(number):
+    if await caller_id_verified(user_id, number):
         return {"number": number, "verified": True, "validation_code": None,
                 "message": f"{number} is already a verified caller ID"}
+    if await _twilio_verified(number):  # verified, but not by this user: another account's number
+        raise CallError("this number cannot be verified for this account", 409, field="callback_number")
     try:
         code = await twilio_api.start_caller_id_validation(number)
     except Exception as e:  # noqa: BLE001
         raise CallError(f"could not start the verification: {e}", 502) from e
+    store.claim_caller_id(user_id, number)
     return {"number": number, "verified": False, "validation_code": code,
             "message": f"Twilio is calling {number} now. Answer and type {code} on the keypad."}
 
 
-# --- Inbound callbacks (section 22.1): forwarded to the owner's phone, no AI ---
+# --- Inbound callbacks (section 22.1): forwarded to a user's phone, no AI ---
+
+def _callback_user(user_id: str | None) -> tuple[dict, str] | None:
+    """(user, callback number) when that user exists, is enabled and has a callback number."""
+    user = store.get_user(user_id) if user_id else None
+    number = get_profile(user["id"])["callback_number"] if user and not user["disabled"] else None
+    return (user, number) if number else None
+
 
 def inbound(form: dict) -> dict | None:
-    """Saves an inbound row and returns it, or None when there is no callback number to forward to."""
-    profile = get_profile()
-    if not profile["callback_number"]:
-        return None
+    """Forwards to the user who last called this number within INBOUND_BUSINESS_DAYS, else to the admin.
+    Saves the inbound row for that user and returns it, or None when there is nobody to forward to."""
     from datetime import datetime, timedelta, timezone
     caller = guard.to_e164(form.get("From", "")) or (form.get("From") or "unknown")[:40]
     since = (datetime.now(timezone.utc) - timedelta(days=config.INBOUND_BUSINESS_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    last = store.last_call_to(caller, since)
+    admin = store.user_by_email(store.admin_email()) if store.admin_email() else None
+    target = _callback_user(last["user_id"] if last else None) or _callback_user(admin["id"] if admin else None)
+    if not target:
+        return None
+    user, forward_to = target
+    # The name comes from the forwarded user's own calls only (the admin never sees another user's business).
+    named = last if last and last["user_id"] == user["id"] else store.last_call_to(caller, since, user["id"])
     call_id = store.new_id("c_")
     store.insert_call({
-        "id": call_id, "created_at": store.now(), "status": "in_progress", "phase": None, "direction": "inbound",
-        "to_number": caller, "business": store.business_for_number(caller, since) or "Incoming call",
-        "goal": "Callback forwarded to the owner's phone", "mode": "handle", "reach": "phone",
+        "id": call_id, "user_id": user["id"], "created_at": store.now(), "status": "in_progress", "phase": None,
+        "direction": "inbound", "to_number": caller, "business": named["business"] if named else "Incoming call",
+        "goal": "Callback forwarded to your phone", "mode": "handle", "reach": "phone",
         "alert_on_human": 0, "listen_in": 0, "alert_wait_seconds": 0, "no_answer": "ai_handles",
         "max_minutes": 0, "voice": config.DEFAULT_VOICE, "record": 0, "leave_voicemail": 0,
-        "twilio_sid": form.get("CallSid"), "from_number": profile["callback_number"],
+        "twilio_sid": form.get("CallSid"), "from_number": forward_to,
     })
     LIVE[call_id] = Live()  # so get_call with wait_seconds waits until the forward ends
-    return {"id": call_id, "caller": caller, "forward_to": profile["callback_number"]}
+    return {"id": call_id, "caller": caller, "forward_to": forward_to}
 
 
 DIAL_STATUS = {"completed": "completed", "answered": "completed", "busy": "busy", "no-answer": "no_answer",
@@ -521,7 +589,7 @@ async def press_keys(call_id: str, digits: str, bot) -> None:
     Twilio cannot send keys on an open media stream, and tones in the stream audio are not key presses for
     every menu (a Twilio menu ignores them; tested with 120 and 300 ms tones). So the call leaves its stream,
     Twilio plays the digits, and the call joins a new stream. The next bot continues with this bot's context."""
-    row, live = must(call_id), LIVE[call_id]
+    row, live = call_row(call_id), LIVE[call_id]
     token = secrets.token_urlsafe(32)
     store.update_call(call_id, ws_token=token)
     live.moved_from = bot
@@ -541,7 +609,7 @@ async def _stream_lost(call_id: str, bot) -> None:
         await asyncio.sleep(0.5)
         if live.moved_from is not bot:  # the next stream took over
             return
-        if is_final(must(call_id)):
+        if is_final(call_row(call_id)):
             break
     live.moved_from = None
     store.update_call(call_id, ws_token=None)
@@ -597,7 +665,7 @@ def answered(call_id: str) -> None:
 
 
 async def stream_started(call_id: str, bot) -> None:
-    row = must(call_id)
+    row = call_row(call_id)
     live = LIVE.setdefault(call_id, Live())
     again, live.moved_from = live.moved_from is not None, None
     live.bot = bot
@@ -683,7 +751,7 @@ def next_deadline(now: float, deadline: float, started: float, phase: str | None
 
 async def watchdog(call_id: str) -> None:
     started = time.monotonic()
-    deadline = started + must(call_id)["max_minutes"] * 60
+    deadline = started + call_row(call_id)["max_minutes"] * 60
     while True:
         await asyncio.sleep(max(0.0, deadline - time.monotonic()))
         row, live = store.get_call(call_id), LIVE.get(call_id)
@@ -693,7 +761,7 @@ async def watchdog(call_id: str) -> None:
                             owner.view(call_id)["state"] == "on_call")
         if new is None:
             event(call_id, "time limit reached, hanging up")
-            await hang_up(call_id)
+            await stop_call(call_row(call_id))
             return
         if new > deadline:
             event(call_id, f"planned length reached; {round((new - time.monotonic()) / 60)} more minutes allowed")

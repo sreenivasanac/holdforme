@@ -46,12 +46,12 @@ def payload(row: dict, kind: str, shows_business: bool) -> dict:
     return {"title": title, "body": body, "url": url, "call_id": cid, "kind": kind}
 
 
-async def send(data: dict) -> int:
-    """Sends one push to every saved device. Returns how many were accepted. 404/410 deletes the device."""
+async def send(user_id: str, data: dict) -> int:
+    """Sends one push to every saved device of the user. Returns how many were accepted. 404/410 deletes the device."""
     if not enabled():
         return 0
     sent = 0
-    for d in store.push_devices():
+    for d in store.push_devices(user_id):
         try:
             await asyncio.to_thread(
                 _webpush, {"endpoint": d["endpoint"], "keys": {"p256dh": d["p256dh"], "auth": d["auth"]}},
@@ -63,20 +63,21 @@ async def send(data: dict) -> int:
         except Exception as e:  # noqa: BLE001 - one bad device must not stop the others
             status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
             if status in (404, 410):
-                store.delete_push_device(d["endpoint"])
+                store.delete_push_device(user_id, d["endpoint"])
             else:
                 log.warning("push failed (status %s)", status)  # never log the endpoint
     return sent
 
 
 async def send_alert(row: dict, kind: str) -> int:
+    """An alert about a call goes only to the devices of the call's user, with that user's settings."""
     from . import calls
 
-    profile = calls.get_profile()
+    profile = calls.get_profile(row["user_id"])
     if not profile["alert_push"]:
         return 0
     try:
-        return await send(payload(row, kind, profile["push_shows_business"]))
+        return await send(row["user_id"], payload(row, kind, profile["push_shows_business"]))
     except Exception:  # noqa: BLE001
         log.exception("push alert failed")
         return 0

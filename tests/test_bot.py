@@ -20,7 +20,7 @@ from pipecat.tests.utils import run_test
 
 from callenvoy import bot, calls, store
 
-from .conftest import CALL, run
+from .conftest import CALL, run, uid
 
 
 def ctx():
@@ -110,7 +110,7 @@ def make_bot(monkeypatch):
 
 def test_tools_refuse_while_the_owner_has_the_call(make_bot, fresh):
     async def go():
-        v = await calls.place_call(calls.PlaceCallInput(**CALL))
+        v = await calls.place_call(uid(), calls.PlaceCallInput(**CALL))
         b = make_bot(v["id"])
         calls.LIVE[v["id"]].bot = b
         b._close_gates(True)
@@ -127,7 +127,7 @@ def test_tools_refuse_while_the_owner_has_the_call(make_bot, fresh):
 
 def test_ask_user_answer_waits_for_the_hand_back(make_bot):
     async def go():
-        v = await calls.place_call(calls.PlaceCallInput(**CALL))
+        v = await calls.place_call(uid(), calls.PlaceCallInput(**CALL))
         cid = v["id"]
         b = make_bot(cid)
         calls.LIVE[cid].bot = b
@@ -135,8 +135,8 @@ def test_ask_user_answer_waits_for_the_hand_back(make_bot):
         task = asyncio.create_task(b._tool_ask_user(p))
         await asyncio.sleep(0.01)
         b._close_gates(True)  # the owner takes the call
-        q = (await calls.get_call(cid))["open_questions"][0]
-        await calls.answer_question(cid, q["id"], "1 Main St")
+        q = (await calls.get_call(uid(), cid))["open_questions"][0]
+        await calls.answer_question(uid(), cid, q["id"], "1 Main St")
         await asyncio.sleep(0.05)
         assert p.results == []  # held back while the owner has the call
         b._close_gates(False)  # hand-back

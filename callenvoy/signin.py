@@ -1,11 +1,13 @@
 """Prints a one-time console sign-in link (first use without mail, or recovery). Run on the server:
 
-    uv run python -m callenvoy.signin
+    uv run python -m callenvoy.signin [email]      (default: the admin, OWNER_EMAIL)
 
-Same rules as a mailed link: one use, SIGNIN_TOKEN_MINUTES. Reads PUBLIC_BASE_URL from .env when it is not set.
+Same rules as a mailed link: one use, SIGNIN_TOKEN_MINUTES, bound to that address (the account is made at the
+first sign-in, as by mail). Reads PUBLIC_BASE_URL and OWNER_EMAIL from .env when they are not set.
 """
 
 import os
+import sys
 
 from . import auth, config, store
 
@@ -24,5 +26,8 @@ def load_env_file() -> None:
 if __name__ == "__main__":
     os.umask(0o077)
     load_env_file()
+    email = (sys.argv[1] if len(sys.argv) > 1 else store.admin_email()).strip().lower()
+    if not auth.email_ok(email):
+        raise SystemExit("usage: uv run python -m callenvoy.signin [email]  (without an address OWNER_EMAIL is used)")
     store.open_db()
-    print(f"Sign-in link (one use, {config.SIGNIN_TOKEN_MINUTES} minutes):\n{auth.signin_link()}")
+    print(f"Sign-in link for {email} (one use, {config.SIGNIN_TOKEN_MINUTES} minutes):\n{auth.signin_link(email)}")

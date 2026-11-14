@@ -449,7 +449,7 @@ class CallBot:
             return
         live = calls.LIVE.get(self.call_id)
         row = store.get_call(self.call_id)
-        name = prompt.owner_name(row, calls.get_profile())
+        name = prompt.owner_name(row, calls.get_profile(row["user_id"]))
         o = owner.get(self.call_id)
         if o.unreachable:
             await params.result_callback(f"{name} could not be reached a moment ago, so do not try again. "
@@ -492,7 +492,7 @@ class CallBot:
             return
         try:
             if self.call_id:
-                await calls.hang_up(self.call_id)
+                await calls.stop_call(calls.call_row(self.call_id))
             else:
                 await twilio_api.update_call(self.twilio_call_sid, hang_up=True)
         except Exception as e:  # noqa: BLE001

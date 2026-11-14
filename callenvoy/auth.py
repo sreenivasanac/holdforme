@@ -1,11 +1,14 @@
-"""Agent keys, the owner's session cookie, one-time sign-in links and the sign-in mail.
+"""Users, agent keys, console sessions, one-time sign-in links and the sign-in mail.
 
-Agent key: `Authorization: Bearer <key>` or /mcp/<key>. Owner session: cookie ce_session. Only hashes are stored.
+Agent key: `Authorization: Bearer <key>` or /mcp/<key>. Console session: cookie ce_session. Both name one user;
+every request acts only on that user's data. Only hashes are stored.
 """
 
 import asyncio
+import contextvars
 import hashlib
 import logging
+import re
 import secrets
 import smtplib
 import ssl
@@ -17,6 +20,8 @@ from . import config, store
 
 log = logging.getLogger("callenvoy.auth")
 clock = time.monotonic
+# The user of the current MCP request (set by main.AuthMiddleware; the MCP SDK hides the HTTP request from tools).
+CURRENT_USER: contextvars.ContextVar[dict | None] = contextvars.ContextVar("callenvoy_user", default=None)
 
 
 class AuthError(Exception):
@@ -27,6 +32,33 @@ class AuthError(Exception):
 
 def digest(secret: str) -> str:
     return hashlib.sha256(secret.encode()).hexdigest()
+
+
+# --- users ---
+
+def is_admin(user: dict | None) -> bool:
+    return bool(user and store.admin_email() and user["email"] == store.admin_email())
+
+
+def active(user: dict | None) -> dict:
+    """The user, or AuthError when the account is gone or disabled."""
+    if not user:
+        raise AuthError("bad_key", "unknown key")
+    if user["disabled"]:
+        raise AuthError("account_disabled", "this account is disabled")
+    store.user_seen(user["id"])
+    return user
+
+
+def signups_open() -> bool:
+    return bool(store.service_setting("signups_open", config.SIGNUPS_OPEN_DEFAULT))
+
+
+_EMAIL = re.compile(r"[^@\s\"<>,;]+@[^@\s\"<>,;]+\.[^@\s\"<>,;.]{2,}")
+
+
+def email_ok(email: str) -> bool:
+    return len(email) <= config.EMAIL_MAX and bool(_EMAIL.fullmatch(email))
 
 
 # --- agent keys ---
@@ -40,11 +72,11 @@ def clean_key(raw: str | None) -> str:
 
 
 def check_key(raw: str | None) -> dict:
-    """The key row for a usable key, else AuthError. Never puts the key into a message."""
+    """The user of a usable key, else AuthError. Never puts the key into a message."""
     key = clean_key(raw)
     if not key:
         raise AuthError("no_credential", "no key: send Authorization: Bearer <key>")
-    row = store.key_by("key_hash", digest(key))
+    row = store.key_by_hash(digest(key))
     if row is None:
         body = key[len(config.KEY_PREFIX):]
         if not key.startswith(config.KEY_PREFIX):
@@ -57,8 +89,9 @@ def check_key(raw: str | None) -> dict:
         raise AuthError("bad_key", "unknown key")
     if row["disabled"]:
         raise AuthError("key_disabled", "this key is disabled; enable it in the console")
+    user = active(store.get_user(row["user_id"]) if row["user_id"] else None)
     store.key_used(row["id"])
-    return row
+    return user
 
 
 def key_view(row: dict) -> dict:
@@ -66,36 +99,38 @@ def key_view(row: dict) -> dict:
             "last_used_at": row["last_used_at"], "disabled": bool(row["disabled"])}
 
 
-def create_key(name: str, key: str | None = None) -> tuple[dict, str]:
-    """Stores a new key (or the given one, for the .env import). Returns the row and the full key."""
+def create_key(user_id: str, name: str, key: str | None = None) -> tuple[dict, str]:
+    """Stores a new key of the user (or the given one, for the .env import). Returns the row and the full key."""
     key = key or config.KEY_PREFIX + "".join(secrets.choice(config.KEY_ALPHABET) for _ in range(config.KEY_BODY_LENGTH))
     row = {"id": store.new_id("k_"), "name": name, "key_hash": digest(key), "prefix": key[:config.KEY_DISPLAY_LENGTH],
-           "created_at": store.now(), "last_used_at": None, "disabled": 0}
+           "created_at": store.now(), "last_used_at": None, "disabled": 0, "user_id": user_id}
     store.insert_key(row)
     return row, key
 
 
 def import_env_key() -> None:
-    """First start after the move to several keys: the single CALLENVOY_API_KEY becomes the first stored key."""
+    """First start after the move to several keys: the single CALLENVOY_API_KEY becomes the admin's first key."""
     key = config.env("CALLENVOY_API_KEY").strip()
+    admin = store.user_by_email(store.admin_email()) if store.admin_email() else None
     # Only once per database (SQLite user_version marks it): a key that the owner deleted must not come back
     # at the next start while the variable is still in .env.
-    if key and not store.keys() and not store.env_key_imported():
-        create_key(config.IMPORTED_KEY_NAME, key)
+    if key and admin and not store.keys(admin["id"]) and not store.env_key_imported():
+        create_key(admin["id"], config.IMPORTED_KEY_NAME, key)
         store.env_key_imported(mark=True)
         log.warning("imported CALLENVOY_API_KEY as \"%s\"; it can now be removed from .env", config.IMPORTED_KEY_NAME)
 
 
-# --- owner sessions and sign-in links ---
+# --- console sessions and sign-in links ---
 
-def new_session(email: str | None) -> str:
+def new_session(user_id: str) -> str:
     token = secrets.token_urlsafe(32)
-    store.add_session(digest(token), email, store.now(config.SESSION_DAYS * 86400))
+    store.add_session(digest(token), user_id, store.now(config.SESSION_DAYS * 86400))
     return token
 
 
 def session(cookie: str | None) -> dict | None:
-    return store.get_session(digest(cookie)) if cookie else None
+    """The user of the session (also a disabled one: the caller decides)."""
+    return store.session_user(digest(cookie)) if cookie else None
 
 
 def end_session(cookie: str | None) -> None:
@@ -103,36 +138,39 @@ def end_session(cookie: str | None) -> None:
         store.delete_session(digest(cookie))
 
 
-def signin_link() -> str:
-    """A one-use link, valid SIGNIN_TOKEN_MINUTES. The page's button POSTs the token (mail scanners only GET)."""
+def signin_link(email: str) -> str:
+    """A one-use link for this address, valid SIGNIN_TOKEN_MINUTES. The page's button POSTs the token (mail
+    scanners only GET)."""
     token = secrets.token_urlsafe(32)
-    store.add_signin_token(digest(token), store.now(config.SIGNIN_TOKEN_MINUTES * 60))
+    store.add_signin_token(digest(token), email, store.now(config.SIGNIN_TOKEN_MINUTES * 60))
     return f"{config.public_base_url()}/signin?token={token}"
 
 
-def take_signin_token(token: str) -> bool:
+def take_signin_token(token: str) -> str | None:
+    """The address the link was made for, once."""
     return store.take_signin_token(digest(token))
 
 
-_requests: list[float] = []
+_requests: dict[str, list[float]] = {}  # bucket -> request times (in memory; one process)
 
 
-def allow_signin_request() -> bool:
-    """SIGNIN_REQUESTS_PER_HOUR for all addresses together (in memory; one process)."""
+def allow_signin_request(email: str, ip: str) -> bool:
+    """Per address, per client IP and global limits (config.SIGNIN_LIMIT_*). A request counts in all three."""
     now = clock()
-    _requests[:] = [t for t in _requests if t > now - 3600]
-    if len(_requests) >= config.SIGNIN_REQUESTS_PER_HOUR:
-        return False
-    _requests.append(now)
+    buckets = {f"a:{email}": config.SIGNIN_LIMIT_PER_ADDRESS, f"i:{ip}": config.SIGNIN_LIMIT_PER_IP,
+               "all": config.SIGNIN_LIMIT_GLOBAL}
+    for name, (limit, window) in buckets.items():
+        times = [t for t in _requests.get(name, []) if t > now - window]
+        _requests[name] = times
+        if len(times) >= limit:
+            return False
+    for name in buckets:
+        _requests[name].append(now)
     return True
 
 
-def owner_email() -> str:
-    return config.env("OWNER_EMAIL").strip()
-
-
 def mail_ready() -> bool:
-    return all((owner_email(), config.env("SMTP_HOST"), config.env("MAIL_FROM")))
+    return all((config.env("SMTP_HOST"), config.env("MAIL_FROM")))
 
 
 def send_mail(to: str, subject: str, text: str) -> None:
@@ -151,15 +189,16 @@ def send_mail(to: str, subject: str, text: str) -> None:
 _sending: set[asyncio.Task] = set()
 
 
-def mail_signin_link() -> None:
-    """Sends the link in the background, so the reply time does not show whether the address was the owner's."""
-    link = signin_link()
-    text = (f"Sign in to {config.APP_NAME}:\n\n{link}\n\nThe link works once, for {config.SIGNIN_TOKEN_MINUTES} "
-            "minutes. If you did not ask for it, ignore this mail.")
+def mail_signin_link(email: str) -> None:
+    """Sends the link in the background, so a slow mail server does not hold the reply."""
+    link = signin_link(email)
+    text = (f"Someone (we hope you) asked to sign in to {config.APP_NAME}, the service that makes phone calls for "
+            f"you, with this address.\n\n{link}\n\nThe link works one time, for {config.SIGNIN_TOKEN_MINUTES} "
+            "minutes. If you did not ask for it, ignore this mail: nothing happens without the link.")
 
     async def go():
         try:
-            await asyncio.to_thread(send_mail, owner_email(), f"Sign in to {config.APP_NAME}", text)
+            await asyncio.to_thread(send_mail, email, f"Sign in to {config.APP_NAME}", text)
         except Exception as e:  # noqa: BLE001 - logged without the link
             log.warning("sign-in mail failed: %s", type(e).__name__)
 

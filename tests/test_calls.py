@@ -4,11 +4,11 @@ import pytest
 
 from callenvoy import calls, config, store
 
-from .conftest import CALL, run
+from .conftest import CALL, run, uid
 
 
 def place(**kw):
-    return run(calls.place_call(calls.PlaceCallInput(**{**CALL, **kw})))
+    return run(calls.place_call(uid(), calls.PlaceCallInput(**{**CALL, **kw})))
 
 
 def end_all():
@@ -19,7 +19,7 @@ def end_all():
 def test_recording_order_and_no_record_params(fresh):
     place()
     assert fresh.created[-1]["record"] is True  # constant default
-    store.save_profile({"record_calls": False})
+    store.save_profile(uid(), {"record_calls": False})
     end_all()
     v = place()
     assert fresh.created[-1]["record"] is False and v["recorded"] is False
@@ -58,7 +58,7 @@ def test_create_call_sends_a_real_form_body(monkeypatch):
 
 
 def test_settings_order_and_bad_values():
-    store.save_profile({"mode": "transfer", "voice": "Rohan", "callback_number": "+14155550199"})
+    store.save_profile(uid(), {"mode": "transfer", "voice": "Rohan", "callback_number": "+14155550199"})
     v = place()
     row = store.get_call(v["id"])
     assert row["mode"] == "transfer" and row["voice"] == "Rohan" and row["alert_wait_seconds"] == 20
@@ -66,9 +66,9 @@ def test_settings_order_and_bad_values():
     row = store.get_call(v["id"])
     assert row["mode"] == "handle" and row["voice"] == "Ethan" and row["alert_wait_seconds"] == 60
     with pytest.raises(calls.CallError, match="handle, transfer"):
-        calls.save_profile({"mode": "nope"})
+        calls.save_profile(uid(), {"mode": "nope"})
     with pytest.raises(calls.CallError, match="1 to 120"):
-        calls.save_profile({"max_minutes": 500})
+        calls.save_profile(uid(), {"max_minutes": 500})
     with pytest.raises(Exception):
         calls.PlaceCallInput(**CALL, voice="Nobody")
 
@@ -81,17 +81,17 @@ def test_save_profile_round_trips_every_setting():
               "alert_push": False, "push_shows_business": False}
     values.update({k: "x" for k in config.PROFILE_FIELDS})
     assert set(values) == set(config.SETTINGS)
-    p = calls.save_profile(values)
+    p = calls.save_profile(uid(), values)
     assert p == {**values, "callback_number": "+14155550199"}
-    p = calls.save_profile({"name": "", "vin": ""})  # empty string removes a text field
+    p = calls.save_profile(uid(), {"name": "", "vin": ""})  # empty string removes a text field
     assert p["name"] is None and p["vin"] is None
 
 
 def test_profile_field_limits():
     with pytest.raises(calls.CallError, match="longer than 30"):
-        calls.save_profile({"assistant_name": "x" * 31})
+        calls.save_profile(uid(), {"assistant_name": "x" * 31})
     with pytest.raises(calls.CallError, match="callback_number"):
-        calls.save_profile({"callback_number": "12345"})
+        calls.save_profile(uid(), {"callback_number": "12345"})
 
 
 def test_phone_reach_without_callback_number_refused():
@@ -102,10 +102,11 @@ def test_phone_reach_without_callback_number_refused():
 
 
 def test_from_own_refused_until_verified(fresh):
-    store.save_profile({"callback_number": "+14155550199"})
+    store.save_profile(uid(), {"callback_number": "+14155550199"})
     with pytest.raises(calls.CallError, match="verif") as e:
         place(**{"from": "own"})
     assert e.value.field == "from"
+    run(calls.verify_number(uid()))  # Twilio calls the number; the user types the code
     fresh.verified.add("+14155550199")
     v = place(**{"from": "own"})
     assert v["calling_number"] == "+14155550199" and fresh.created[-1]["from_number"] == "+14155550199"
@@ -114,12 +115,12 @@ def test_from_own_refused_until_verified(fresh):
 def test_limits_refuse_third_call_and_over_cap():
     place()
     place()
-    with pytest.raises(calls.CallError, match="already running") as e:
+    with pytest.raises(calls.CallError, match="service is busy") as e:
         place()
-    assert e.value.status == 429
+    assert e.value.status == 429 and "running" not in str(e.value)  # nothing about other users' calls
     for r in store.live_calls():
         store.update_call(r["id"], status="completed", talk_seconds=config.DAILY_MINUTE_CAP * 60)
-    with pytest.raises(calls.CallError, match="limit"):
+    with pytest.raises(calls.CallError, match="service's daily limit"):
         place()
 
 
@@ -137,32 +138,32 @@ def test_watchdog_rules():
 
 def test_long_poll_returns_early_on_new_line_and_on_timeout():
     async def go():
-        v = await calls.place_call(calls.PlaceCallInput(**CALL))
+        v = await calls.place_call(uid(), calls.PlaceCallInput(**CALL))
         cid = v["id"]
         loop = asyncio.get_running_loop()
         loop.call_later(0.05, store.add_line, cid, "them", "hello")
         t0 = loop.time()
-        got = await calls.get_call(cid, wait_seconds=5)
+        got = await calls.get_call(uid(), cid, wait_seconds=5)
         assert loop.time() - t0 < 2 and got["transcript"][-1]["text"] == "hello"
         t0 = loop.time()
-        got = await calls.get_call(cid, wait_seconds=1, since_line=got["next_line"])
+        got = await calls.get_call(uid(), cid, wait_seconds=1, since_line=got["next_line"])
         assert 0.9 < loop.time() - t0 < 2 and got["transcript"] == []
     run(go())
 
 
 def test_answer_question_round_trip_and_finished_call():
     async def go():
-        v = await calls.place_call(calls.PlaceCallInput(**CALL))
+        v = await calls.place_call(uid(), calls.PlaceCallInput(**CALL))
         cid = v["id"]
         waiter = asyncio.create_task(calls.ask(cid, "What is the address?"))
         await asyncio.sleep(0.01)
-        q = (await calls.get_call(cid))["open_questions"][0]
-        await calls.answer_question(cid, q["id"], "1 Main St")
+        q = (await calls.get_call(uid(), cid))["open_questions"][0]
+        await calls.answer_question(uid(), cid, q["id"], "1 Main St")
         assert await waiter == "1 Main St"
         store.update_call(cid, status="completed")
         qid = store.add_question(cid, "late?")
         with pytest.raises(calls.CallError, match="ended"):
-            await calls.answer_question(cid, qid, "x")
+            await calls.answer_question(uid(), cid, qid, "x")
     run(go())
 
 
@@ -170,7 +171,7 @@ def test_inbound_row_and_business_name():
     v = place(business="Dr. Chen's office", to="+14155550123")
     store.update_call(v["id"], status="completed")
     assert calls.inbound({"From": "+14155550123", "CallSid": "CAin"}) is None  # no callback number
-    store.save_profile({"callback_number": "+14155550199"})
+    store.save_profile(uid(), {"callback_number": "+14155550199"})
     fwd = calls.inbound({"From": "+14155550123", "CallSid": "CAin"})
     row = store.get_call(fwd["id"])
     assert row["direction"] == "inbound" and row["business"] == "Dr. Chen's office" and not row["record"]
@@ -213,13 +214,13 @@ def test_stuck_dialing_call_is_closed(fresh, monkeypatch):
     monkeypatch.setattr(config, "DIAL_TIMEOUT_SECONDS", 0.05)
 
     async def go():
-        v = await calls.place_call(calls.PlaceCallInput(**CALL))
+        v = await calls.place_call(uid(), calls.PlaceCallInput(**CALL))
         await asyncio.sleep(0.2)
         row = store.get_call(v["id"])
         assert row["status"] == "failed" and "no status from Twilio" in row["error"]
         assert (row["twilio_sid"], {"hang_up": True}) in fresh.updated
         assert v["id"] not in calls.LIVE and not store.live_calls()
-        v2 = await calls.place_call(calls.PlaceCallInput(**CALL))
+        v2 = await calls.place_call(uid(), calls.PlaceCallInput(**CALL))
         store.update_call(v2["id"], status="in_progress")  # answered: the timeout leaves it alone
         await asyncio.sleep(0.2)
         assert store.get_call(v2["id"])["status"] == "in_progress"
@@ -228,25 +229,25 @@ def test_stuck_dialing_call_is_closed(fresh, monkeypatch):
 
 def test_inbound_get_call_waits_until_the_forward_ends():
     """Contract 8: a forwarded call is live until the <Dial> action callback."""
-    store.save_profile({"callback_number": "+14155550199"})
+    store.save_profile(uid(), {"callback_number": "+14155550199"})
 
     async def go():
         fwd = calls.inbound({"From": "+14155550123", "CallSid": "CAin"})
         loop = asyncio.get_running_loop()
         t0 = loop.time()
-        got = await calls.get_call(fwd["id"], wait_seconds=1)
+        got = await calls.get_call(uid(), fwd["id"], wait_seconds=1)
         assert loop.time() - t0 > 0.9 and not got["finished"]
         loop.call_later(0.05, lambda: asyncio.ensure_future(
             calls.inbound_done(fwd["id"], {"DialCallStatus": "completed", "DialCallDuration": "30"})))
         t0 = loop.time()
-        got = await calls.get_call(fwd["id"], wait_seconds=5)
+        got = await calls.get_call(uid(), fwd["id"], wait_seconds=5)
         assert loop.time() - t0 < 2 and got["finished"] and got["talk_seconds"] == 30
     run(go())
 
 
 def test_caller_id_cache(fresh, monkeypatch):
     """Fix 14: Twilio is asked once per CALLER_ID_CACHE_SECONDS; a verify request clears the cache."""
-    store.save_profile({"callback_number": "+14155550199"})
+    store.save_profile(uid(), {"callback_number": "+14155550199"})
     asked = []
     real = fresh.caller_id_verified
 
@@ -257,12 +258,13 @@ def test_caller_id_cache(fresh, monkeypatch):
     from callenvoy import twilio_api
 
     monkeypatch.setattr(twilio_api, "caller_id_verified", counting)
-    calls._caller_id_cache.clear()
-    assert run(calls.caller_id()) == {"number": "+14155550199", "verified": False}
+    run(calls.verify_number(uid()))  # starts the verification (and clears the cache)
+    asked.clear()
+    assert run(calls.caller_id(uid())) == {"number": "+14155550199", "verified": False}
     fresh.verified.add("+14155550199")
-    assert run(calls.caller_id())["verified"] is False and len(asked) == 1  # cached
-    run(calls.verify_number())  # clears the cache (and sees it is verified now)
-    assert run(calls.caller_id())["verified"] is True
+    assert run(calls.caller_id(uid()))["verified"] is False and len(asked) == 1  # cached
+    run(calls.verify_number(uid()))  # clears the cache (and sees it is verified now)
+    assert run(calls.caller_id(uid()))["verified"] is True
 
 
 class StubBot:
@@ -280,7 +282,7 @@ class StubBot:
 def test_key_press_moves_the_call_to_a_new_stream(fresh):
     """Twilio plays real digits, then the call joins a new stream with a new one-use token and the next bot."""
     async def go():
-        cid = (await calls.place_call(calls.PlaceCallInput(**CALL)))["id"]
+        cid = (await calls.place_call(uid(), calls.PlaceCallInput(**CALL)))["id"]
         old, new = StubBot(), StubBot()
         await calls.stream_started(cid, old)
         await calls.press_keys(cid, "1w2", old)
@@ -298,7 +300,7 @@ def test_key_press_moves_the_call_to_a_new_stream(fresh):
 
 def test_key_press_then_no_new_stream_closes_the_call(fresh):
     async def go():
-        cid = (await calls.place_call(calls.PlaceCallInput(**CALL)))["id"]
+        cid = (await calls.place_call(uid(), calls.PlaceCallInput(**CALL)))["id"]
         old = StubBot()
         await calls.stream_started(cid, old)
         await calls.press_keys(cid, "1", old)

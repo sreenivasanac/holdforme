@@ -1,6 +1,6 @@
 from callenvoy import push, store
 
-from .conftest import run
+from .conftest import run, uid
 
 
 def test_payload_respects_push_shows_business():
@@ -26,8 +26,8 @@ def test_410_deletes_device_and_others_still_sent(monkeypatch):
     monkeypatch.setenv("VAPID_PUBLIC_KEY", "pub")
     monkeypatch.setenv("VAPID_PRIVATE_KEY", "priv")
     monkeypatch.setenv("VAPID_SUBJECT", "mailto:a@b.c")
-    store.save_push_device("https://fcm.googleapis.com/dead", "p", "a", None)
-    store.save_push_device("https://fcm.googleapis.com/ok", "p", "a", None)
+    store.save_push_device(uid(), "https://fcm.googleapis.com/dead", "p", "a", None)
+    store.save_push_device(uid(), "https://fcm.googleapis.com/ok", "p", "a", None)
     calls = []
 
     class Gone(Exception):
@@ -39,8 +39,8 @@ def test_410_deletes_device_and_others_still_sent(monkeypatch):
             raise Gone()
 
     monkeypatch.setattr(push, "_webpush", fake)
-    assert run(push.send({"title": "t"})) == 1
-    assert [d["endpoint"] for d in store.push_devices()] == ["https://fcm.googleapis.com/ok"]
+    assert run(push.send(uid(), {"title": "t"})) == 1
+    assert [d["endpoint"] for d in store.push_devices(uid())] == ["https://fcm.googleapis.com/ok"]
     assert calls[0][1] == 60 and calls[0][2] == {"Urgency": "high"}
 
 

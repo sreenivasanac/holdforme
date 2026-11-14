@@ -15,14 +15,14 @@ from urllib.parse import urlparse
 from xml.sax.saxutils import escape, quoteattr
 
 import httpx
-from fastapi import FastAPI, Query, Request, WebSocket
+from fastapi import Depends, FastAPI, Query, Request, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from loguru import logger as loguru_logger
 from mcp.server.transport_security import TransportSecuritySettings
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, Field, StrictBool, StringConstraints
 from starlette.requests import HTTPConnection
 
 from . import auth, calls, config, demo_line, guard, mcp_server, owner, owner_audio, push, store, twilio_api
@@ -83,7 +83,8 @@ api.router.routes.extend(_mcp_app.routes)  # POST /mcp, served by the SDK's ASGI
 
 
 PUBLIC_API = {"/api/demo-line", "/api/auth/me", "/api/auth/request", "/api/auth/verify", "/api/auth/sign-out"}
-OWNER_ONLY = ("/api/keys", "/api/auth/", "/api/push/")  # an owner session only, never an agent key
+OWNER_ONLY = ("/api/keys", "/api/auth/", "/api/push/")  # a console session only, never an agent key
+ADMIN_API = "/api/admin/"  # the admin's console session only; everyone else gets 404
 UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
 
 
@@ -96,9 +97,10 @@ def _noindex(send):
 
 
 class AuthMiddleware:
-    """/mcp: agent key. /api/*: agent key (not on OWNER_ONLY routes) or the owner's session cookie; PUBLIC_API
-    needs neither. /mcp/<key> is rewritten to /mcp. Errors: {"error", "code"}. The key-in-path form is never
-    logged (run uvicorn with --no-access-log)."""
+    """/mcp: agent key. /api/*: agent key (not on OWNER_ONLY routes) or a console session cookie; PUBLIC_API
+    needs neither. Both credentials name one user: it goes to the routes as scope["ce_user"] (see `me`) and to
+    the MCP tools as auth.CURRENT_USER. /mcp/<key> is rewritten to /mcp. Errors: {"error", "code"}. The
+    key-in-path form is never logged (run uvicorn with --no-access-log)."""
 
     def __init__(self, app):
         self.app = app
@@ -120,6 +122,7 @@ class AuthMiddleware:
             key = conn.headers.get("authorization")
         else:
             return await self.app(scope, receive, send)
+        user = None
         try:
             if path.startswith("/api/") and key is None:
                 # Cookie (or no credential): the browser. Its writes must come from our own page.
@@ -129,16 +132,26 @@ class AuthMiddleware:
                     cookie = conn.cookies.get(config.SESSION_COOKIE)
                     if not cookie:
                         raise auth.AuthError("no_credential", "sign in, or send Authorization: Bearer <key>")
-                    if not auth.session(cookie):
+                    user = auth.session(cookie)
+                    if not user:
                         raise auth.AuthError("session_expired", "the session has ended; sign in again")
+                    auth.active(user)
+                    if path.startswith(ADMIN_API) and not auth.is_admin(user):  # before any body check
+                        return await JSONResponse({"detail": "not found"}, status_code=404)(scope, receive, send)
             elif path not in PUBLIC_API:
-                auth.check_key(key)
+                user = auth.check_key(key)
+                if path.startswith(ADMIN_API):
+                    return await JSONResponse({"detail": "not found"}, status_code=404)(scope, receive, send)
                 # The audio ticket lets its holder hear and speak on a live call: the owner only.
                 if path.startswith(OWNER_ONLY) or path.endswith("/audio-ticket"):
                     raise auth.AuthError("owner_only", "agent keys cannot use this; sign in to the console", 403)
         except auth.AuthError as e:
             return await JSONResponse({"error": str(e), "code": e.code}, status_code=e.status)(scope, receive, send)
-        return await self.app(scope, receive, send)
+        token = auth.CURRENT_USER.set(user)
+        try:
+            return await self.app({**scope, "ce_user": user}, receive, send)
+        finally:
+            auth.CURRENT_USER.reset(token)
 
 
 api.add_middleware(AuthMiddleware)
@@ -168,45 +181,67 @@ async def _invalid(_req, e: RequestValidationError):
 
 # --- console API (same functions as the MCP tools) ---
 
+def me(request: Request) -> dict:
+    """The user of the request's key or session (AuthMiddleware). Every route with user data takes it."""
+    user = request.scope.get("ce_user")
+    if not user:
+        raise calls.CallError("sign in", 401)
+    return user
+
+
+def admin(user: Annotated[dict, Depends(me)]) -> dict:
+    """The admin's session (an agent key never gets here). Anyone else: 404, as if the route did not exist."""
+    if not auth.is_admin(user):
+        raise calls.CallError("not found", 404)
+    return user
+
+
+Me = Annotated[dict, Depends(me)]
+Admin = Annotated[dict, Depends(admin)]
+
+
 @api.get("/healthz")
 async def healthz():
     return {"ok": True}
 
 
 @api.get("/api/config")
-async def get_config():
+async def get_config(user: Me):
     return {
         "app_name": config.APP_NAME,
         "mcp_url": config.public_base_url() + "/mcp",
         "voices": mcp_server.voices(),
+        # minutes_used_today: the service's minutes (all users: the shared daily cap); my_minutes_today: this user's
         "limits": {"max_call_minutes": config.MAX_CALL_MINUTES, "max_concurrent_calls": config.MAX_CONCURRENT_CALLS,
-                   "daily_minute_cap": config.DAILY_MINUTE_CAP, "minutes_used_today": calls.minutes_used_today()},
+                   "daily_minute_cap": config.DAILY_MINUTE_CAP, "minutes_used_today": calls.minutes_used_today(),
+                   "my_minutes_today": calls.minutes_used_today(user["id"])},
         "defaults": config.SETTING_DEFAULTS,
         "choices": {k: s["choices"] for k, s in config.SETTINGS.items() if s["type"] == "choice"},
         "ranges": {k: [s["min"], s["max"]] for k, s in config.SETTINGS.items() if s["type"] == "int"},
         "text_limits": {k: s["max"] for k, s in config.SETTINGS.items() if s["type"] == "text"},
         "vapid_public_key": config.env("VAPID_PUBLIC_KEY") or None if push.enabled() else None,
+        "demo": config.DEMO_CALL,
     }
 
 
 @api.get("/api/calls")
-async def list_calls(limit: int = Query(10, ge=1, le=50)):
-    return calls.list_calls(limit)
+async def list_calls(user: Me, limit: int = Query(10, ge=1, le=50)):
+    return calls.list_calls(user["id"], limit)
 
 
 @api.post("/api/calls")
-async def place_call(body: calls.PlaceCallInput):
-    return {"id": (await calls.place_call(body))["id"]}
+async def place_call(user: Me, body: calls.PlaceCallInput):
+    return {"id": (await calls.place_call(user["id"], body))["id"]}
 
 
 @api.get("/api/calls/{call_id}")
-async def get_call(call_id: str, wait_seconds: int = Query(0, ge=0, le=50), since_line: int = Query(0, ge=0)):
-    return await calls.get_call(call_id, wait_seconds, since_line)
+async def get_call(user: Me, call_id: str, wait_seconds: int = Query(0, ge=0, le=50), since_line: int = Query(0, ge=0)):
+    return await calls.get_call(user["id"], call_id, wait_seconds, since_line)
 
 
 @api.post("/api/calls/{call_id}/hang-up")
-async def hang_up(call_id: str):
-    return {"ok": True, "message": await calls.hang_up(call_id)}
+async def hang_up(user: Me, call_id: str):
+    return {"ok": True, "message": await calls.hang_up(user["id"], call_id)}
 
 
 class Answer(BaseModel):
@@ -215,8 +250,8 @@ class Answer(BaseModel):
 
 
 @api.post("/api/calls/{call_id}/answer")
-async def answer(call_id: str, body: Answer):
-    await calls.answer_question(call_id, body.question_id, body.answer)
+async def answer(user: Me, call_id: str, body: Answer):
+    await calls.answer_question(user["id"], call_id, body.question_id, body.answer)
     return {"ok": True, "message": "sent"}
 
 
@@ -227,47 +262,48 @@ class Connect(BaseModel):
 
 
 @api.post("/api/calls/{call_id}/connect")
-async def connect(call_id: str, body: Connect):
-    return {"ok": True, "message": await owner.connect(call_id, body.mode, body.reach, body.phone)}
+async def connect(user: Me, call_id: str, body: Connect):
+    return {"ok": True, "message": await owner.connect(user["id"], call_id, body.mode, body.reach, body.phone)}
 
 
 @api.post("/api/calls/{call_id}/hand-back")
-async def hand_back(call_id: str):
-    return {"ok": True, "message": await owner.hand_back(call_id)}
+async def hand_back(user: Me, call_id: str):
+    return {"ok": True, "message": await owner.hand_back(calls.must(user["id"], call_id)["id"])}
 
 
 @api.post("/api/calls/{call_id}/audio-ticket")
-async def audio_ticket(call_id: str):
-    row = calls.must(call_id)
+async def audio_ticket(user: Me, call_id: str):
+    """Only for the call's user (and never for an agent key, see AuthMiddleware): the ticket opens its audio."""
+    row = calls.must(user["id"], call_id)
     if row["status"] != "in_progress" or call_id not in calls.LIVE:
         raise calls.CallError("the call is not live", 409)
     return {"ticket": guard.issue_ticket(call_id), "expires_in": config.AUDIO_TICKET_SECONDS}
 
 
 @api.get("/api/profile")
-async def get_profile():
-    return calls.get_profile()
+async def get_profile(user: Me):
+    return calls.get_profile(user["id"])
 
 
 @api.put("/api/profile")
-async def put_profile(request: Request):
+async def put_profile(user: Me, request: Request):
     try:
         body = await request.json()
     except ValueError:
         body = None
     if not isinstance(body, dict):
         raise calls.CallError("send a JSON object of settings")
-    return calls.save_profile(body)
+    return calls.save_profile(user["id"], body)
 
 
 @api.get("/api/caller-id")
-async def caller_id():
-    return await calls.caller_id()
+async def caller_id(user: Me):
+    return await calls.caller_id(user["id"])
 
 
 @api.post("/api/caller-id/verify")
-async def caller_id_verify():
-    return {"validation_code": (await calls.verify_number())["validation_code"]}
+async def caller_id_verify(user: Me):
+    return {"validation_code": (await calls.verify_number(user["id"]))["validation_code"]}
 
 
 class PushKeys(BaseModel):
@@ -286,30 +322,30 @@ class PushEndpoint(BaseModel):
 
 
 @api.post("/api/push/subscriptions")
-async def push_subscribe(body: PushSub):
+async def push_subscribe(user: Me, body: PushSub):
     if not push.endpoint_ok(body.endpoint):
         raise calls.CallError("this push service is not supported", field="endpoint")
-    known = {d["endpoint"] for d in store.push_devices()}
+    known = {d["endpoint"] for d in store.push_devices(user["id"])}
     if body.endpoint not in known and len(known) >= config.MAX_PUSH_DEVICES:
         raise calls.CallError(f"at most {config.MAX_PUSH_DEVICES} devices; remove one first", 409)
-    store.save_push_device(body.endpoint, body.keys.p256dh, body.keys.auth, body.label)
+    store.save_push_device(user["id"], body.endpoint, body.keys.p256dh, body.keys.auth, body.label)
     return {"ok": True}
 
 
 @api.delete("/api/push/subscriptions")
-async def push_unsubscribe(body: PushEndpoint):
-    store.delete_push_device(body.endpoint)
+async def push_unsubscribe(user: Me, body: PushEndpoint):
+    store.delete_push_device(user["id"], body.endpoint)
     return {"ok": True}
 
 
 @api.post("/api/push/test")
-async def push_test():
+async def push_test(user: Me):
     if not push.enabled():
         raise calls.CallError("web push is off: the server has no VAPID keys", 409)
-    return {"sent": await push.send(push.payload({"business": ""}, "test", False))}
+    return {"sent": await push.send(user["id"], push.payload({"business": ""}, "test", False))}
 
 
-# --- agent keys (owner session only, see AuthMiddleware) ---
+# --- agent keys (console session only, see AuthMiddleware) ---
 
 KeyName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=config.KEY_NAME_MAX)]
 
@@ -323,78 +359,110 @@ class KeyChange(BaseModel):
     disabled: bool | None = None
 
 
-def _key(key_id: str) -> dict:
-    row = store.key_by("id", key_id)
+def _key(user_id: str, key_id: str) -> dict:
+    row = store.get_key(user_id, key_id)
     if not row:
         raise calls.CallError("no such key", 404)
     return row
 
 
 @api.get("/api/keys")
-async def list_keys():
-    return {"keys": [auth.key_view(r) for r in store.keys()]}
+async def list_keys(user: Me):
+    return {"keys": [auth.key_view(r) for r in store.keys(user["id"])]}
 
 
 @api.post("/api/keys", status_code=201)
-async def create_key(body: NewKey):
-    if len(store.keys()) >= config.MAX_KEYS:
+async def create_key(user: Me, body: NewKey):
+    if len(store.keys(user["id"])) >= config.MAX_KEYS:
         raise calls.CallError(f"at most {config.MAX_KEYS} keys; delete one first", 409)
-    row, key = auth.create_key(body.name)
+    row, key = auth.create_key(user["id"], body.name)
     view = auth.key_view(row)
     return {k: view[k] for k in ("id", "name", "prefix", "created_at")} | {"key": key}
 
 
 @api.patch("/api/keys/{key_id}")
-async def change_key(key_id: str, body: KeyChange):
-    _key(key_id)
+async def change_key(user: Me, key_id: str, body: KeyChange):
+    _key(user["id"], key_id)
     changes = {k: int(v) if k == "disabled" else v for k, v in body.model_dump(exclude_none=True).items()}
     if changes:
-        store.update_key(key_id, **changes)
-    return auth.key_view(_key(key_id))
+        store.update_key(user["id"], key_id, **changes)
+    return auth.key_view(_key(user["id"], key_id))
 
 
 @api.delete("/api/keys/{key_id}", status_code=204)
-async def delete_key(key_id: str):
-    _key(key_id)
-    store.delete_key(key_id)
+async def delete_key(user: Me, key_id: str):
+    _key(user["id"], key_id)
+    store.delete_key(user["id"], key_id)
     return Response(status_code=204)
 
 
-# --- owner sign-in (public routes; the session cookie is the only owner credential) ---
+# --- sign-in and sign-up (public routes; the session cookie is the only console credential) ---
 
 class SignInRequest(BaseModel):
-    email: str = Field(min_length=1, max_length=254)
+    email: str = Field(min_length=1, max_length=config.EMAIL_MAX + 20)  # room for white space; email_ok checks
 
 
 class SignInToken(BaseModel):
     token: str = Field(min_length=1, max_length=200)
 
 
+def _refused(code: str, message: str, status: int) -> JSONResponse:
+    return JSONResponse({"error": message, "code": code}, status_code=status)
+
+
+def client_ip(request: Request) -> str:
+    """nginx appends the address it saw to X-Forwarded-For: only that last entry can be trusted."""
+    forwarded = request.headers.get("x-forwarded-for", "").split(",")[-1].strip()
+    return forwarded or (request.client.host if request.client else "")
+
+
+def _may_sign_in(email: str) -> JSONResponse | None:
+    """The refusal for a disabled account, or for a new address while sign-ups are off (the admin may always)."""
+    user = store.user_by_email(email)
+    if user and user["disabled"]:
+        return _refused("account_disabled", "this account is disabled", 403)
+    if not user and not auth.signups_open() and email != store.admin_email():
+        return _refused("signups_closed", "new accounts are closed right now", 403)
+    return None
+
+
 @api.get("/api/auth/me")
 async def auth_me(request: Request):
-    s = auth.session(request.cookies.get(config.SESSION_COOKIE))
-    return {"signed_in": bool(s), "email": s["email"] if s else None, "mail_ready": auth.mail_ready()}
+    user = auth.session(request.cookies.get(config.SESSION_COOKIE))
+    on = bool(user and not user["disabled"])
+    return {"signed_in": on, "email": user["email"] if on else None, "mail_ready": auth.mail_ready(),
+            "is_admin": on and auth.is_admin(user), "signups_open": auth.signups_open(),
+            "first_run": on and not calls.get_profile(user["id"])["name"]}
 
 
 @api.post("/api/auth/request")
-async def auth_request(body: SignInRequest):
-    """Always {"ok": true}: the reply never tells whether the address is the owner's."""
-    if not auth.allow_signin_request():
-        return JSONResponse({"error": "too many sign-in requests; try again in an hour", "code": "rate_limited"},
-                            status_code=429)
-    if auth.mail_ready() and body.email.strip().lower() == auth.owner_email().lower():
-        auth.mail_signin_link()
+async def auth_request(body: SignInRequest, request: Request):
+    """Mails a one-time link to any valid address (open sign-up). The user is created at the first verify."""
+    email = body.email.strip().lower()
+    if not auth.email_ok(email):
+        return _refused("bad_email", "enter a valid email address", 400)
+    if not auth.allow_signin_request(email, client_ip(request)):
+        return _refused("rate_limited", "too many sign-in requests; try again later", 429)
+    refused = _may_sign_in(email)
+    if refused:
+        return refused
+    if auth.mail_ready():
+        auth.mail_signin_link(email)
     return {"ok": True}
 
 
 @api.post("/api/auth/verify")
 async def auth_verify(body: SignInToken):
-    if not auth.take_signin_token(body.token):
-        return JSONResponse({"error": "this sign-in link was used, has expired, or is unknown", "code": "bad_link"},
-                            status_code=400)
-    email = auth.owner_email() or None
-    r = JSONResponse({"ok": True, "email": email})
-    r.set_cookie(config.SESSION_COOKIE, auth.new_session(email), max_age=config.SESSION_DAYS * 86400,
+    email = auth.take_signin_token(body.token)
+    if not email:
+        return _refused("bad_link", "this sign-in link was used, has expired, or is unknown", 400)
+    refused = _may_sign_in(email)
+    if refused:
+        return refused
+    user = store.user_by_email(email) or store.add_user(email)  # the account starts at its first sign-in
+    store.user_seen(user["id"])
+    r = JSONResponse({"ok": True, "email": user["email"]})
+    r.set_cookie(config.SESSION_COOKIE, auth.new_session(user["id"]), max_age=config.SESSION_DAYS * 86400,
                  path=config.BASE_PATH, secure=True, httponly=True, samesite="strict")
     return r
 
@@ -405,6 +473,65 @@ async def auth_sign_out(request: Request):
     r = JSONResponse({"ok": True})
     r.delete_cookie(config.SESSION_COOKIE, path=config.BASE_PATH, secure=True, httponly=True, samesite="strict")
     return r
+
+
+# --- admin: usage only, never call content (admin session only; others get 404) ---
+
+class UserChange(BaseModel):
+    disabled: StrictBool
+
+
+class ServiceSettings(BaseModel):
+    signups_open: StrictBool
+
+
+def _user_view(user: dict, usage: dict, names: dict) -> dict:
+    numbers = usage.get(user["id"], {"calls": 0, "minutes": 0, "minutes_today": 0, "live_calls": 0})
+    return {"id": user["id"], "email": user["email"], "name": names.get(user["id"]), "created_at": user["created_at"],
+            "last_seen_at": user["last_seen_at"], "disabled": bool(user["disabled"]), "is_admin": auth.is_admin(user),
+            **numbers}
+
+
+def _other_user(me: dict, user_id: str) -> dict:
+    user = store.get_user(user_id)
+    if not user:
+        raise calls.CallError("no user with that id", 404)
+    if user["id"] == me["id"]:
+        raise calls.CallError("you cannot disable or remove your own account")
+    return user
+
+
+@api.get("/api/admin/users")
+async def admin_users(_me: Admin):
+    usage, names = calls.usage(), store.profile_names()
+    return {"signups_open": auth.signups_open(), "users": [_user_view(u, usage, names) for u in store.users()]}
+
+
+@api.patch("/api/admin/users/{user_id}")
+async def admin_change_user(who: Admin, user_id: str, body: UserChange):
+    """Disable: keys and sessions answer 401 account_disabled, live calls are hung up. Enable undoes it."""
+    _other_user(who, user_id)
+    store.set_user_disabled(user_id, body.disabled)
+    if body.disabled:
+        await calls.stop_user_calls(user_id)
+    return _user_view(store.get_user(user_id), calls.usage(), store.profile_names())
+
+
+@api.delete("/api/admin/users/{user_id}", status_code=204)
+async def admin_remove_user(who: Admin, user_id: str):
+    """Hangs up the user's live calls, then deletes the user, all their data and their cached recordings."""
+    _other_user(who, user_id)
+    await calls.stop_user_calls(user_id, drop=True)
+    for sid in store.delete_user(user_id):
+        if re.fullmatch(r"RE\w{1,64}", sid):
+            (config.RECORDINGS_DIR / f"{sid}.mp3").unlink(missing_ok=True)
+    return Response(status_code=204)
+
+
+@api.put("/api/admin/settings")
+async def admin_settings(_me: Admin, body: ServiceSettings):
+    store.set_service_setting("signups_open", body.signups_open)
+    return {"signups_open": body.signups_open}
 
 
 # --- recordings ---
@@ -583,7 +710,8 @@ async def twilio_media(ws: WebSocket, token: str):
     call_id = row["id"]
     live = calls.LIVE.get(call_id)
     before = live.moved_from if live else None  # set when a key press moved the call to this new stream
-    the_bot = bot.CallBot(ws, data["stream_id"], data["call_id"], prompt.build_prompt(row, calls.get_profile()),
+    profile = calls.get_profile(row["user_id"])  # the call's user: name, details, callback number
+    the_bot = bot.CallBot(ws, data["stream_id"], data["call_id"], prompt.build_prompt(row, profile),
                           config.voice(row["voice"])["reference_id"], call_id=call_id,
                           messages=bot.resume_messages(before.context.get_messages()) if before else None)
     try:

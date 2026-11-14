@@ -2,7 +2,7 @@
 
 A private phone-call server for AI agents. An agent (Claude Code, Codex, Claude Desktop, Grok, or any MCP client) asks CallEnvoy to call a business. The AI presses the menu keys, waits on hold, and talks to the person. You can get an alert, listen in, take the call over, and hand it back.
 
-- Live at `https://pragnyalabs.com/callenvoy` (one owner; named API keys for agents, email sign-in for the console).
+- Live at `https://pragnyalabs.com/callenvoy` (a few users, each with their own data; named API keys for agents, email sign-in for the console).
 - Design and API follow [Call4me](https://github.com/skeptrunedev/call4me) (MIT) where that fits. Thank you to its author.
 - Earlier this repository held the hackathon project HoldForMe / CallOrHold4Me.
 
@@ -36,13 +36,24 @@ Clients that cannot send headers (Grok) use `https://pragnyalabs.com/callenvoy/m
 | Credential | How | Opens |
 |---|---|---|
 | Agent key | `Authorization: Bearer <key>` or `/mcp/<key>` | `/mcp`, `/api/calls*`, `/api/profile`, `/api/config`, `/api/caller-id*` |
-| Owner session | cookie `ce_session` after an email sign-in link (30 days) | every `/api/*` route, including the owner-only `/api/keys*` and `/api/push/*` |
+| Console session | cookie `ce_session` after an email sign-in link (30 days) | every `/api/*` route, including the console-only `/api/keys*` and `/api/push/*`; `/api/admin/*` for the admin only |
 
+- Both credentials belong to one user, and every route and MCP tool acts only on that user's data.
 - Keys look like `ce_live_` + 32 characters. You can have up to 20, each with a name, a last-used time, and Disable / Enable / Delete. A key is shown once; the server stores only its SHA-256 hash.
 - Upgrade from one key: at the first start with an empty key list, `CALLENVOY_API_KEY` is stored as the key "First key (.env)". Then remove it from `.env` (the server starts without it; a deleted key would come back if the list is empty again and the variable is still set).
-- The console asks for an email address and mails a one-time link (15 minutes) to `OWNER_EMAIL` only. Mail settings: `OWNER_EMAIL`, `SMTP_HOST`, `SMTP_PORT` (default 587, STARTTLS), `SMTP_USER`, `SMTP_PASSWORD`, `MAIL_FROM`. At most 5 link requests per hour.
-- First use without mail, or recovery: on the server, in the app folder, run `uv run python -m callenvoy.signin`. It prints a one-time sign-in link (it reads `PUBLIC_BASE_URL` from `.env`).
-- A refused request gets 401 `{"error", "code"}` with `code` one of `no_credential`, `bad_key`, `key_disabled`, `malformed_key`, `session_expired`. An agent key on an owner-only route gets 403 `owner_only`; a console write from a foreign `Origin` gets 403 `bad_origin`.
+- The console asks for an email address and mails a one-time link (15 minutes) for that address. Mail settings: `SMTP_HOST`, `SMTP_PORT` (default 587, STARTTLS), `SMTP_USER`, `SMTP_PASSWORD`, `MAIL_FROM`. Link requests are limited to 3 per address and 10 per client IP per hour, and 60 per day in total (`SIGNIN_LIMIT_*` in `callenvoy/config.py`; the IP is the last `X-Forwarded-For` entry, set by nginx); over a limit: 429 `rate_limited`.
+- First use without mail, or recovery: on the server, in the app folder, run `uv run python -m callenvoy.signin [email]` (default: the admin, `OWNER_EMAIL`). It prints a one-time sign-in link for that address (it reads `PUBLIC_BASE_URL` and `OWNER_EMAIL` from `.env`).
+- A refused request gets 401 `{"error", "code"}` with `code` one of `no_credential`, `bad_key`, `key_disabled`, `malformed_key`, `session_expired`, `account_disabled`. An agent key on a console-only route gets 403 `owner_only`; a console write from a foreign `Origin` gets 403 `bad_origin`.
+
+## Users and the admin
+
+- Open sign-up: anyone with an email address can make an account. The account is created at the first sign-in with a link. `POST /api/auth/request` answers 400 `bad_email` for an invalid address, 403 `signups_closed` for a new address while sign-ups are off, and 403 `account_disabled` for a disabled account.
+- Each user has their own calls, transcripts, recordings, profile and settings, keys, alert devices, and verified caller ID. A call id of another user answers like an unknown id (404). Recording links `/r/<token>` stay token links: share one only on purpose.
+- A call needs the profile name (the AI says it calls on that person's behalf). Without it, placing a call is refused with a message to set the name (`callenvoy_save_profile` or Settings).
+- The admin is the user whose email is `OWNER_EMAIL`. The admin's **People** page (`GET /api/admin/users`) shows usage only: name, email, joined, last active, calls, minutes (total and today), live calls. The admin can disable, enable, and remove a user (`PATCH` / `DELETE /api/admin/users/{id}`), but not their own account. Disable: the user's keys and sessions answer 401 `account_disabled` and their live calls are hung up. Remove: live calls are hung up, then the user and all their data (calls, transcripts, profile, keys, sessions, alert devices, cached recording files) are deleted.
+- The switch **New sign-ups** (`PUT /api/admin/settings {"signups_open": bool}`, default on) closes sign-up for new addresses; existing users and the admin can still sign in.
+- Caller ID: Twilio's verified numbers are shared by the whole account, so a user can call from their own number only after they started its verification themselves (`callenvoy_verify_number`); a number another user verified cannot be used.
+- Upgrade from one owner: at the first start the database is migrated in place, once, in one transaction. A user is made for `OWNER_EMAIL` and gets every existing call, key, profile value and alert device; sessions and sign-in links are dropped (sign in again). If the database holds data and `OWNER_EMAIL` is not set, the server refuses to start and says so.
 
 Tools (prefix `callenvoy_`): `place_call`, `get_call`, `hang_up`, `list_calls`, `answer_question`, `connect_me`, `hand_back`, `get_recordings`, `get_profile`, `save_profile`, `list_voices`, `verify_number`.
 
@@ -54,6 +65,10 @@ Tools (prefix `callenvoy_`): `place_call`, `get_call`, `hang_up`, `list_calls`, 
 | `transfer` | Gets through the menu and the hold, then asks the person to wait | Get an alert in the console, then a phone ring, and join |
 
 You join in the browser (audio goes through the server; headphones recommended) or on your phone (key 1 takes over, `*` hands back).
+
+## Callbacks
+
+All users call from one Twilio number. When a business calls it back, the call is forwarded to the callback number of the user who most recently called that business number in the last 14 days (`INBOUND_BUSINESS_DAYS`). If nobody did, or that user is disabled or has no callback number, it goes to the admin's callback number; with none, the caller hears that the number does not take calls. The callback shows in that user's call list.
 
 ## Alerts
 
@@ -79,7 +94,7 @@ The three Indian English voices are community voices on Fish Audio; if one is re
 
 ## Limits
 
-US and Canada numbers only; premium and non-US/Canada area codes are blocked. 30 minutes planned per call (extended on hold or in a live talk), 120 at most, 2 calls at one time, 240 minutes per day. Calls are recorded by default; some US states require all parties to agree to a recording, and that is the owner's duty. The server keeps a copy of each recording mp3 in `data/recordings/` (fetched from Twilio on first play) and serves it with HTTP Range, so players can seek.
+US and Canada numbers only; premium and non-US/Canada area codes are blocked. 30 minutes planned per call (extended on hold or in a live talk), 120 at most. The service limits are shared by all users: 2 calls at one time and 240 minutes per day in total (`/api/config` gives `limits.minutes_used_today` for the service and `limits.my_minutes_today` for the user). Calls to the demo line (`DEMO_LINE_NUMBER`, pre-filled from `/api/config` `demo`) always use the CallEnvoy number, because the demo line answers only that number. Calls are recorded by default; some US states require all parties to agree to a recording, and that is the duty of the user who places the call. The server keeps a copy of each recording mp3 in `data/recordings/` (fetched from Twilio on first play) and serves it with HTTP Range, so players can seek.
 
 ## Run locally
 

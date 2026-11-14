@@ -4,7 +4,7 @@ import asyncio
 
 from callenvoy import calls, owner, owner_audio, store
 
-from .conftest import CALL, run
+from .conftest import CALL, run, uid
 
 
 class Clock:
@@ -73,8 +73,8 @@ class Link:
 def live_call(monkeypatch, **kw):
     clock = Clock()
     monkeypatch.setattr(owner, "_sleep", clock.sleep)
-    store.save_profile({"callback_number": "+14155550199"})
-    v = run(calls.place_call(calls.PlaceCallInput(**{**CALL, **kw})))
+    store.save_profile(uid(), {"callback_number": "+14155550199"})
+    v = run(calls.place_call(uid(), calls.PlaceCallInput(**{**CALL, **kw})))
     store.update_call(v["id"], status="in_progress")
     bot = Bot()
     calls.LIVE[v["id"]].bot = bot
@@ -174,7 +174,7 @@ def test_connect_phone_rings_even_with_browser_link(monkeypatch, fresh):
     async def go():
         browser = Link()
         await owner.attach(cid, browser)
-        msg = await owner.connect(cid, "join", "phone")
+        msg = await owner.connect(uid(), cid, "join", "phone")
         assert "ringing" in msg and len(owner_legs(fresh)) == 1 and owner.view(cid)["state"] == "ringing"
         await owner.attach(cid, Link("phone"))
         assert browser.closed and browser.reason == "replaced"
